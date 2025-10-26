@@ -1,11 +1,18 @@
 import sqlite3
+import threading
 from typing import List, Tuple
 
 DB_NAME = 'agente_personal.db'
 
 class AgentePersonal:
     def __init__(self, db_path: str = DB_NAME):
-        self.conn = sqlite3.connect(db_path)
+        # Permite usar la conexión desde varios hilos y activa las claves foráneas
+        self.conn = sqlite3.connect(db_path, check_same_thread=False)
+        # Lock para serializar el acceso a la base de datos cuando se usa la misma
+        # conexión desde múltiples hilos (evita condiciones de carrera y errores
+        # como FOREIGN KEY constraint failed debido a escrituras concurrentes).
+        self.lock = threading.Lock()
+        self.conn.execute('PRAGMA foreign_keys = ON')
         self._crear_tablas()
 
     def _crear_tablas(self):
@@ -25,7 +32,7 @@ class AgentePersonal:
                 proyecto_id INTEGER NOT NULL,
                 descripcion TEXT NOT NULL,
                 estado TEXT DEFAULT 'pendiente',
-                FOREIGN KEY(proyecto_id) REFERENCES proyectos(id)
+                FOREIGN KEY(proyecto_id) REFERENCES proyectos(id) ON DELETE CASCADE
             )
         ''')
         # Conversaciones (pueden ser libres o asociadas a un proyecto)
@@ -35,7 +42,7 @@ class AgentePersonal:
                 nombre TEXT,
                 proyecto_id INTEGER,
                 fecha_inicio TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY(proyecto_id) REFERENCES proyectos(id)
+                FOREIGN KEY(proyecto_id) REFERENCES proyectos(id) ON DELETE CASCADE
             )
         ''')
         # Mensajes (texto o voz)
@@ -47,7 +54,7 @@ class AgentePersonal:
                 tipo TEXT NOT NULL, -- 'texto' o 'voz'
                 contenido TEXT NOT NULL,
                 fecha TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY(conversacion_id) REFERENCES conversaciones(id)
+                FOREIGN KEY(conversacion_id) REFERENCES conversaciones(id) ON DELETE CASCADE
             )
         ''')
         self.conn.commit()
