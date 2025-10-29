@@ -839,11 +839,11 @@ class ChatUI:
                 except Exception as e:
                     raise RuntimeError(f'Error de transcripción: {e}')
 
-                self.entry_msg.delete(0, tk.END)
-                if texto:
-                    self.entry_msg.insert(0, texto)
-                else:
-                    self.entry_msg.insert(0, '')
+                # Insertar transcripción y enviar automáticamente en el hilo de UI
+                try:
+                    self.root.after(0, lambda: self._insertar_y_enviar(texto))
+                except Exception:
+                    pass
 
             except sr.WaitTimeoutError:
                 self.entry_msg.delete(0, tk.END)
@@ -856,8 +856,22 @@ class ChatUI:
                     self.btn_microfono.config(state='normal')
                 except Exception:
                     pass
-
+        # Lanzar el hilo de captura
         threading.Thread(target=grabar, daemon=True).start()
+
+    def _insertar_y_enviar(self, texto: str):
+        """Inserta el texto transcrito en el cuadro y dispara el envío para que el modelo responda."""
+        try:
+            self.entry_msg.delete(0, tk.END)
+            texto = (texto or '').strip()
+            if not texto:
+                # Si no hay nada útil, no enviar
+                return
+            self.entry_msg.insert(0, texto)
+            # Disparar envío (misma conversación actual o autogenerará)
+            self.enviar_mensaje()
+        except Exception:
+            pass
 
     def borrar_historial(self):
         if not self.conversacion_id:
