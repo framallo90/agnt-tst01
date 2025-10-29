@@ -138,6 +138,25 @@ class ChatUI:
         self.menu_chat.add_separator()
         self.menu_chat.add_command(label='Borrar Historial', command=self.borrar_historial)
 
+        # Menús alternativos con pista cuando no hay selección
+        self.menu_proyecto_vacio = tk.Menu(self.root, tearoff=0)
+        self.menu_proyecto_vacio.add_command(
+            label='Seleccioná un proyecto para Renombrar/Eliminar', state='disabled')
+        self.menu_proyecto_vacio.add_separator()
+        self.menu_proyecto_vacio.add_command(label='Nuevo Proyecto', command=self.crear_proyecto)
+
+        self.menu_chat_vacio_proy = tk.Menu(self.root, tearoff=0)
+        self.menu_chat_vacio_proy.add_command(
+            label='Seleccioná un chat o creá uno nuevo', state='disabled')
+        self.menu_chat_vacio_proy.add_separator()
+        self.menu_chat_vacio_proy.add_command(label='Nuevo Chat', command=self.crear_chat)
+
+        self.menu_chat_vacio_sin_proy = tk.Menu(self.root, tearoff=0)
+        self.menu_chat_vacio_sin_proy.add_command(
+            label='Seleccioná un proyecto para crear chats', state='disabled')
+        self.menu_chat_vacio_sin_proy.add_separator()
+        self.menu_chat_vacio_sin_proy.add_command(label='Nuevo Chat', state='disabled')
+
         # ---- Área de chat (derecha)
         self.frame_chat = tk.Frame(self.frame_main, bg=DARK_BG)
         self.frame_chat.pack(side='right', fill='both', expand=True)
@@ -156,6 +175,14 @@ class ChatUI:
         self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)  # Windows
         self.canvas.bind_all("<Button-4>", self._on_mousewheel)    # Linux up
         self.canvas.bind_all("<Button-5>", self._on_mousewheel)    # Linux down
+
+        # ---- Status (pistas) justo encima del input
+        self.status_var = tk.StringVar(value='')
+        self.frame_status = tk.Frame(self.root, bg=DARK_PANEL)
+        self.frame_status.pack(side='bottom', fill='x')
+        self.lbl_status = tk.Label(self.frame_status, textvariable=self.status_var,
+                                   bg=DARK_PANEL, fg='#9aa0a6', font=('Segoe UI', 9))
+        self.lbl_status.pack(side='left', padx=(20, 5), pady=(2, 2))
 
         # ---- Input abajo
         self.frame_input = tk.Frame(self.root, bg=DARK_PANEL)
@@ -251,7 +278,14 @@ class ChatUI:
             # 'Nuevo Proyecto' siempre habilitado
         except Exception:
             pass
-        self.menu_proyecto.tk_popup(event.x_root, event.y_root)
+        # Elegir menú según haya selección o no
+        menu = self.menu_proyecto if has_selection else self.menu_proyecto_vacio
+        # Pista en status
+        if has_selection:
+            self._set_status('Tip: botón derecho para renombrar o eliminar el proyecto seleccionado.')
+        else:
+            self._set_status('Tip: no hay proyecto seleccionado. Podés crear uno nuevo desde el menú.')
+        menu.tk_popup(event.x_root, event.y_root)
 
     def _mostrar_menu_chat(self, event):
         has_selection = False
@@ -288,7 +322,26 @@ class ChatUI:
             self.menu_chat.entryconfig(2, state='normal' if self.proyecto_id is not None else 'disabled')
         except Exception:
             pass
-        self.menu_chat.tk_popup(event.x_root, event.y_root)
+        # Elegir menú según haya selección y proyecto actual
+        if has_selection:
+            menu = self.menu_chat
+            self._set_status('Tip: podés renombrar o eliminar la conversación seleccionada.')
+        else:
+            if self.proyecto_id is not None:
+                menu = self.menu_chat_vacio_proy
+                self._set_status('Tip: no hay conversación seleccionada. Creá una nueva desde el menú.')
+            else:
+                menu = self.menu_chat_vacio_sin_proy
+                self._set_status('Tip: seleccioná un proyecto para poder crear conversaciones.')
+        menu.tk_popup(event.x_root, event.y_root)
+
+    def _set_status(self, msg: str, timeout: int = 3000):
+        try:
+            self.status_var.set(msg)
+            if timeout:
+                self.root.after(timeout, lambda: self.status_var.set(''))
+        except Exception:
+            pass
 
     def _on_mousewheel(self, event):
         if hasattr(event, 'delta') and event.delta:  # Windows
