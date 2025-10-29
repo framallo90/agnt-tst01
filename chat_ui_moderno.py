@@ -127,7 +127,8 @@ class ChatUI:
         self.menu_proyecto.add_command(label='Renombrar Proyecto', command=self.renombrar_proyecto)
         self.menu_proyecto.add_command(label='Eliminar Proyecto', command=self.eliminar_proyecto)
         self.menu_proyecto.add_separator()
-        self.menu_proyecto.add_command(label='Nuevo Chat', command=self.crear_chat)
+        # Crear nuevos proyectos desde el menú contextual de Proyectos
+        self.menu_proyecto.add_command(label='Nuevo Proyecto', command=self.crear_proyecto)
 
         self.menu_chat = tk.Menu(self.root, tearoff=0)
         self.menu_chat.add_command(label='Renombrar Conversación', command=self.renombrar_chat)
