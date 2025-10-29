@@ -276,15 +276,18 @@ class ChatUI:
             return
         try:
             with self.agente.lock:
+                cur2 = self.agente.conn.cursor()
                 # Cancelar respuestas en curso de todas las conversaciones del proyecto
-                convs = cur.execute('SELECT id FROM conversaciones WHERE proyecto_id=?', (proyecto_id,)).fetchall()
+                convs = cur2.execute('SELECT id FROM conversaciones WHERE proyecto_id=?', (proyecto_id,)).fetchall()
                 for (cid,) in convs:
                     ev = self._cancelaciones.get(cid)
                     if ev:
                         ev.set()
-                cur.execute('BEGIN IMMEDIATE')
+                        # quitar del mapa para evitar fugas
+                        self._cancelaciones.pop(cid, None)
+                cur2.execute('BEGIN IMMEDIATE')
                 # Borrar sólo el proyecto; la cascada se encarga del resto
-                cur.execute('DELETE FROM proyectos WHERE id=?', (proyecto_id,))
+                cur2.execute('DELETE FROM proyectos WHERE id=?', (proyecto_id,))
                 self.agente.conn.commit()
         except Exception as e:
             messagebox.showerror('Error', f'No se pudo eliminar el proyecto: {e}')
@@ -399,12 +402,14 @@ class ChatUI:
             return
         try:
             with self.agente.lock:
+                cur2 = self.agente.conn.cursor()
                 # Cancelar respuesta en curso asociada a esta conversación
                 ev = self._cancelaciones.get(conv_id)
                 if ev:
                     ev.set()
-                cur.execute('BEGIN IMMEDIATE')
-                cur.execute('DELETE FROM conversaciones WHERE id=?', (conv_id,))
+                    self._cancelaciones.pop(conv_id, None)
+                cur2.execute('BEGIN IMMEDIATE')
+                cur2.execute('DELETE FROM conversaciones WHERE id=?', (conv_id,))
                 self.agente.conn.commit()
         except Exception as e:
             messagebox.showerror('Error', f'No se pudo eliminar la conversación: {e}')
@@ -530,7 +535,7 @@ class ChatUI:
 
         # Snapshot para responder sobre la misma conversación aunque el usuario cambie de selección
         conv_id_snapshot = self.conversacion_id
-        # Preparar cancelador para esta conversación
+        # Resetear/crear token de cancelación para esta conversación
         ev = threading.Event()
         self._cancelaciones[conv_id_snapshot] = ev
         if self.stream_enabled:
@@ -572,6 +577,8 @@ class ChatUI:
                 self.agente.conn.commit()
         except Exception:
             return
+        # Limpieza del token de cancelación si sigue siendo el mismo
+        self._cancelaciones.pop(conversacion_id, None)
         self.respuesta_queue.put(True)
 
     def _respuesta_streaming(self, texto_usuario: str, conversacion_id: int, cancel_event: threading.Event):
@@ -607,6 +614,7 @@ class ChatUI:
                 self.agente.conn.commit()
         except Exception:
             return
+        self._cancelaciones.pop(conversacion_id, None)
         self.respuesta_queue.put(True)
 
     def _animar_puntos(self):

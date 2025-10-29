@@ -31,16 +31,11 @@ ag.conn.commit()
 cur.execute("SELECT id FROM mensajes WHERE conversacion_id=?", (conv_id,))
 print('Messages for conv:', [r[0] for r in cur.fetchall()])
 
-# Now attempt deletion using the same logic as UI
+# Now attempt deletion using a single DELETE relying on cascade
 try:
-    cur.execute('SELECT id FROM conversaciones WHERE proyecto_id=?', (proj_id,))
-    convs = cur.fetchall()
-    for (cid,) in convs:
-        cur.execute('DELETE FROM mensajes WHERE conversacion_id=?', (cid,))
-    cur.execute('DELETE FROM conversaciones WHERE proyecto_id=?', (proj_id,))
     cur.execute('DELETE FROM proyectos WHERE id=?', (proj_id,))
     ag.conn.commit()
-    print('Deletion succeeded')
+    print('Deletion succeeded (cascade)')
 except Exception as e:
     print('Deletion failed:', repr(e))
 

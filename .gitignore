@@ -1,2 +1,6 @@
 llama-2-7b-chat.Q4_K_M.gguf
 PROMPT_MAESTRO.md
+agente_personal.db
+__pycache__/
+*.pyc
+*.db

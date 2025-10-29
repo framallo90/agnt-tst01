@@ -40,11 +40,6 @@ t.start()
 
 # Main thread deletes project immediately
 with ag.lock:
-    cur.execute('SELECT id FROM conversaciones WHERE proyecto_id=?', (pid,))
-    convs = cur.fetchall()
-    for (conv_id,) in convs:
-        cur.execute('DELETE FROM mensajes WHERE conversacion_id=?', (conv_id,))
-    cur.execute('DELETE FROM conversaciones WHERE proyecto_id=?', (pid,))
     cur.execute('DELETE FROM proyectos WHERE id=?', (pid,))
     ag.conn.commit()
 
