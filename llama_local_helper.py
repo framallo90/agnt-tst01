@@ -28,7 +28,11 @@ def obtener_respuesta_llama_stream(historial, callback, delay=0.08):
     acumulado = ""
     for p in partes:
         acumulado += p
-        callback(acumulado)
+        try:
+            callback(acumulado)
+        except Exception:
+            # No dejar que un error de UI detenga el streaming
+            pass
         time.sleep(delay)
 
     # Devuelve el texto final

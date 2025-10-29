@@ -13,7 +13,7 @@ from tkinter import ttk, simpledialog, messagebox
 import queue, threading, sqlite3
 
 from agente_personal import AgentePersonal
-from llama_local_helper import obtener_respuesta_llama_stream
+from llama_local_helper import obtener_respuesta_llama_stream, obtener_respuesta_llama
 
 # --- Clase principal de la UI ---
 class ChatUI:
@@ -310,7 +310,6 @@ class ChatUI:
             self.btn_renombrar_chat.pack_forget()
             self.btn_eliminar_chat.pack_forget()
             self.btn_borrar_hist.pack_forget()
-            self.btn_nuevo_chat.pack_forget()
             return
 
         nombre = self.listbox_proyectos.get(sel[0])
@@ -323,7 +322,6 @@ class ChatUI:
             self._cargar_chats(self.proyecto_id)
             self.btn_renombrar.pack(pady=(4, 4), padx=12, fill='x')
             self.btn_eliminar.pack(pady=(0, 8), padx=12, fill='x')
-            self.btn_nuevo_chat.pack(pady=(0, 6))
 
     def _cargar_proyectos(self, seleccionar_nombre: str | None = None):
         self.listbox_proyectos.delete(0, tk.END)
@@ -534,7 +532,13 @@ class ChatUI:
         try:
             respuesta_final = obtener_respuesta_llama_stream(historial, actualizar_burbuja)
         except Exception as e:
-            respuesta_final = f"[Error del modelo] {e}"
+            # Fallback: si el stream falla, generamos respuesta no-stream para no dejar colgado al usuario
+            try:
+                respuesta_final = obtener_respuesta_llama(historial)
+            except Exception:
+                respuesta_final = f"[Error del modelo] {e}"
+            # Asegurar que la burbuja muestre el final aunque el stream haya fallado
+            self.root.after(0, self._actualizar_burbuja_agente, respuesta_final)
 
         # Guardar final (protegiendo con lock contra borrados concurrentes)
         try:
