@@ -65,12 +65,19 @@ class ChatUI:
         self._grab_fs = 16000
 
         # --- INICIALIZACIÓN DE WIDGETS ---
+        # --- INICIALIZACIÓN DE WIDGETS ---
         self.frame_main = tk.Frame(self.root, bg=DARK_BG)
         self.frame_main.pack(fill='both', expand=True)
-        self.frame_main.pack_propagate(True)
-        self.frame_menu = tk.Frame(self.frame_main, bg=DARK_PANEL, width=220)
-        self.frame_menu.pack(side='left', fill='both', expand=True)
-        self.frame_menu.pack_propagate(True)
+        self.frame_main.pack_propagate(False)
+        # Barra lateral con ancho fijo
+        self.frame_menu = tk.Frame(self.frame_main, bg=DARK_PANEL, width=260)
+        self.frame_menu.pack(side='left', fill='y')
+        self.frame_menu.pack_propagate(False)
+        # Área de chat flexible
+        self.frame_chat = tk.Frame(self.frame_main, bg=DARK_BG)
+        self.frame_chat.pack(side='right', fill='both', expand=True)
+        self.frame_chat.pack_propagate(True)
+
         hdr = tk.Frame(self.frame_menu, bg=DARK_PANEL)
         hdr.pack(fill='x', pady=(16, 8))
         tk.Label(hdr, text='Proyectos', bg=DARK_PANEL, fg=TEXT_COLOR,
@@ -98,9 +105,7 @@ class ChatUI:
         self.listbox_chats.pack(fill='both', expand=True, pady=(6, 6))
         self.listbox_chats.bind('<<ListboxSelect>>', self.seleccionar_chat)
         self.listbox_chats.bind('<Button-3>', self._mostrar_menu_chat)
-        self.frame_chat = tk.Frame(self.frame_main, bg=DARK_BG)
-        self.frame_chat.pack(side='right', fill='both', expand=True)
-        self.frame_chat.pack_propagate(True)
+
         # Nuevo recuadro visual para el área de chat
         self.frame_chat_area = tk.Frame(
             self.frame_chat,
