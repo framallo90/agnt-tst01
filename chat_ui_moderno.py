@@ -1,3 +1,19 @@
+import functools
+
+def captura_errores_metodo(func):
+    @functools.wraps(func)
+    def wrapper(self, *args, **kwargs):
+        try:
+            return func(self, *args, **kwargs)
+        except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
+            if hasattr(self, '_show_toast_error'):
+                self._show_toast_error(f"Error: {e}\nTraceback:\n{tb}")
+            else:
+                print(f"Error: {e}\nTraceback:\n{tb}")
+            return None
+    return wrapper
 # -*- coding: utf-8 -*-
 # --- Constantes de estilo y color ---
 DARK_BG = '#23272f'
@@ -22,7 +38,133 @@ from llama_local_helper import obtener_respuesta_llama_stream, obtener_respuesta
 
 # --- Clase principal de la UI ---
 class ChatUI:
+    # --- NUEVO: Lectura de archivos ---
+    @captura_errores_metodo
+    def _leer_archivo(self):
+        from tkinter import filedialog
+        import os
+        import threading
+        filetypes = [
+            ("Todos", "*.txt *.docx *.xlsx *.csv *.pdf"),
+            ("Texto", "*.txt"),
+            ("Word", "*.docx"),
+            ("Excel", "*.xlsx *.csv"),
+            ("PDF", "*.pdf")
+        ]
+        ruta = filedialog.askopenfilename(title="Selecciona un archivo", filetypes=filetypes)
+        if not ruta:
+            self._show_toast_error("No se seleccionó ningún archivo.")
+            return
+        ext = os.path.splitext(ruta)[1].lower()
+
+        def procesar_archivo():
+            try:
+                contenido = ""
+                msg_error = None
+                if ext == ".txt":
+                    try:
+                        with open(ruta, "r", encoding="utf-8") as f:
+                            contenido = f.read()
+                    except Exception as e:
+                        msg_error = f"No se pudo leer el archivo de texto: {e}"
+                elif ext == ".docx":
+                    try:
+                        from docx import Document
+                        doc = Document(ruta)
+                        contenido = "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
+                    except Exception as e:
+                        msg_error = f"No se pudo leer el archivo Word: {e}"
+                elif ext == ".xlsx":
+                    try:
+                        import pandas as pd
+                        df = pd.read_excel(ruta)
+                        contenido = df.to_string(index=False)
+                    except Exception as e:
+                        msg_error = f"No se pudo leer el archivo Excel: {e}"
+                elif ext == ".csv":
+                    try:
+                        import pandas as pd
+                        df = pd.read_csv(ruta, encoding="utf-8", engine="python", error_bad_lines=False)
+                        contenido = df.to_string(index=False)
+                    except Exception as e:
+                        msg_error = f"No se pudo leer el archivo CSV: {e}"
+                elif ext == ".pdf":
+                    try:
+                        import pdfplumber
+                        with pdfplumber.open(ruta) as pdf:
+                            paginas = [page.extract_text() for page in pdf.pages if page.extract_text()]
+                            contenido = "\n".join(paginas)
+                        if not contenido.strip():
+                            msg_error = "El PDF no tiene texto extraíble. Puede estar escaneado o vacío."
+                    except Exception as e:
+                        msg_error = f"No se pudo leer el archivo PDF: {e}"
+                else:
+                    self.root.after(0, lambda: self._show_toast_error("Tipo de archivo no soportado."))
+                    return
+                if msg_error:
+                    self.root.after(0, lambda: self._show_toast_error(msg_error))
+                    return
+                if not contenido.strip():
+                    self.root.after(0, lambda: self._show_toast_error("El archivo está vacío o no se pudo extraer texto."))
+                    return
+                contenido_corto = contenido[:5000]
+                prompt = f"Resume el siguiente contenido de archivo para el usuario:\n{contenido_corto}"
+                self.root.after(0, lambda: self._insertar_burbuja("Usuario", f"Archivo leído correctamente: {os.path.basename(ruta)}"))
+                self.root.after(0, lambda: self._guardar_mensaje("Usuario", f"Archivo leído correctamente: {os.path.basename(ruta)}"))
+                self.root.after(0, self._cargar_historial)
+                self.root.after(0, lambda: self._insertar_burbuja("Usuario", "Procesando resumen del archivo..."))
+
+                resumen_result = {'done': False, 'resumen': None}
+                def modelo_thread():
+                    try:
+                        resumen_result['resumen'] = obtener_respuesta_llama([
+                            {"role": "user", "content": prompt}
+                        ])
+                    except Exception as e:
+                        import traceback
+                        tb = traceback.format_exc()
+                        resumen_result['resumen'] = f"Error al generar resumen: {e}\nTraceback:\n{tb}"
+                        # Mostrar error en la UI si ocurre un crash en el hilo
+                        self.root.after(0, lambda: self._show_toast_error(f"Error al generar resumen: {e}\nTraceback:\n{tb}"))
+                    finally:
+                        resumen_result['done'] = True
+
+                hilo_modelo = threading.Thread(target=modelo_thread)
+                hilo_modelo.start()
+                hilo_modelo.join(timeout=90)  # Timeout de 90 segundos
+                resumen = resumen_result.get('resumen')
+                if not resumen_result['done']:
+                    # Si el modelo no respondió, usar el fallback demo
+                    from llama_local_helper import obtener_respuesta_llama as fallback_llama
+                    resumen = fallback_llama([
+                        {"role": "user", "content": prompt}
+                    ])
+                    resumen = f"[Timeout] El modelo no respondió a tiempo. Respuesta alternativa:\n{resumen}"
+                if not resumen or not resumen.strip():
+                    resumen = "No se pudo generar el resumen del archivo. (El modelo no respondió)"
+                self.root.after(0, lambda: self._insertar_burbuja("Usuario", f"Este archivo contiene:\n{resumen}"))
+                self.root.after(0, lambda: self._guardar_mensaje("Usuario", f"Este archivo contiene:\n{resumen}"))
+                self.root.after(0, self._cargar_historial)
+            except Exception as e:
+                import traceback
+                tb = traceback.format_exc()
+                self.root.after(0, lambda: self._show_toast_error(f"Error al leer archivo: {e}\nTraceback:\n{tb}"))
+
+        threading.Thread(target=procesar_archivo, daemon=True).start()
+
+    # --- Agregar botón para leer archivo ---
+    @captura_errores_metodo
+    def _agregar_boton_archivo(self):
+        if hasattr(self, 'btn_archivo') and self.btn_archivo:
+            self.btn_archivo.pack_forget()
+        if self.conversacion_id:
+            btn_archivo = self._make_button(self.frame_input, '📄 Leer Archivo', command=self._leer_archivo)
+            btn_archivo.pack(side='left', padx=(0, 8))
+            self.btn_archivo = btn_archivo
+        else:
+            self.btn_archivo = None
     # --- Helper para recarga de listboxes ---
+    @captura_errores_metodo
     def _reload_listbox(self, listbox, items, seleccionar=None):
         listbox.delete(0, tk.END)
         for item in items:
@@ -38,6 +180,7 @@ class ChatUI:
     UI del agente personal: proyectos -> chats -> mensajes
     """
     # --- Toast/burbuja de error ---
+    @captura_errores_metodo
     def _show_toast_error(self, msg, duration=3500):
         # Crea una burbuja flotante en la esquina inferior derecha de la ventana principal
         if hasattr(self, '_toast_error') and self._toast_error:
@@ -67,6 +210,7 @@ class ChatUI:
         self._toast_error.place(x=x, y=y)
         self.root.after(duration, lambda: self._toast_error.destroy())
     # --- Toast/burbuja de tip ---
+    @captura_errores_metodo
     def _show_toast_tip(self, msg, duration=2500):
         if hasattr(self, '_toast_tip') and self._toast_tip:
             self._toast_tip.destroy()
@@ -93,6 +237,7 @@ class ChatUI:
         y = rh - h - 24
         self._toast_tip.place(x=x, y=y)
         self.root.after(duration, lambda: self._toast_tip.destroy())
+    @captura_errores_metodo
     def __init__(self, root):
         self.root = root
         self.root.title("Agente Personal")
@@ -194,6 +339,7 @@ class ChatUI:
         self.entry_mensaje = self._make_entry(self.frame_input)
         self.entry_mensaje.pack(side='left', fill='x', expand=True, padx=(0, 8))
         self.entry_mensaje.bind('<Return>', self.enviar_mensaje)
+        self._agregar_boton_archivo()
         self.btn_microfono = self._make_button(
             self.frame_input, '🎤', command=self.dictar_mensaje, width=3, primary=True
         )
@@ -251,6 +397,7 @@ class ChatUI:
     # La carga inicial de proyectos e historial se difiere a run() para no bloquear el arranque
 
     # --- Helper para manejo seguro de errores en UI ---
+    @captura_errores_metodo
     def _safe(self, func, *args, **kwargs):
         try:
             return func(*args, **kwargs)
@@ -261,6 +408,7 @@ class ChatUI:
     # ---- Status (pistas) justo encima del input
 
     # ---------------- Estilos y factories ----------------
+    @captura_errores_metodo
     def _init_style(self):
         try:
             if tb:
@@ -282,6 +430,7 @@ class ChatUI:
         except Exception:
             self.style = ttk.Style()
 
+    @captura_errores_metodo
     def _make_button(self, parent, text, command=None, width=None, primary=False, danger=False):
         if tb:
             bootstyle = 'primary' if primary else ('danger' if danger else 'secondary')
@@ -297,6 +446,7 @@ class ChatUI:
                 btn.config(width=width)
             return btn
 
+    @captura_errores_metodo
     def _make_entry(self, parent):
         if tb:
             return tb.Entry(parent, font=FONT)
@@ -305,6 +455,7 @@ class ChatUI:
             return e
 
     # ---------------- Menús contextuales ----------------
+    @captura_errores_metodo
     def _mostrar_menu_proyecto(self, event):
         has_selection = False
         count = self.listbox_proyectos.size()
@@ -581,6 +732,7 @@ class ChatUI:
         self._cargar_chats(self.proyecto_id)
 
     def seleccionar_chat(self, event=None):
+        self._agregar_boton_archivo()
         sel = self.listbox_chats.curselection()
         if not sel:
             return
