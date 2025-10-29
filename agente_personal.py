@@ -72,7 +72,9 @@ class AgentePersonal:
             return False
         if not fks:
             return True  # no tiene FKs
-        return all((len(row) >= 6 and (row[5] or '').upper() == 'CASCADE') for row in fks)
+        # PRAGMA foreign_key_list columns: id,seq,table,from,to,on_update,on_delete,match
+        # We must check on_delete (index 6), not on_update (index 5)
+        return all((len(row) >= 7 and (row[6] or '').upper() == 'CASCADE') for row in fks)
 
     def _limpiar_huerfanos(self):
         """Elimina registros huérfanos en caso de que existan por falta histórica de FKs."""

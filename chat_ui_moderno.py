@@ -10,6 +10,11 @@ FONT = ('Segoe UI', 11)
 
 import tkinter as tk
 from tkinter import ttk, simpledialog, messagebox
+# Theming: use ttkbootstrap if available for a more modern look
+try:
+    import ttkbootstrap as tb  # type: ignore
+except Exception:
+    tb = None  # fallback to plain ttk
 import queue, threading, sqlite3
 
 from agente_personal import AgentePersonal
@@ -46,6 +51,7 @@ class ChatUI:
         # Mapa de chats visibles: índice -> conversacion_id
         self._chat_map = []
 
+        self._init_style()
         self._build_ui()
         self._cargar_proyectos()
         self._chequear_respuesta()
@@ -69,10 +75,7 @@ class ChatUI:
         hdr.pack(fill='x', pady=(16, 8))
         tk.Label(hdr, text='Proyectos', bg=DARK_PANEL, fg=TEXT_COLOR,
                  font=('Segoe UI', 13, 'bold')).pack(side='left', padx=(12, 8))
-        tk.Button(hdr, text='+', width=3, bg=USER_BUBBLE, fg='white',
-                  font=('Segoe UI', 12, 'bold'), relief='flat',
-                  activebackground=USER_BUBBLE,
-                  command=self.crear_proyecto).pack(side='right', padx=(0, 12))
+    # Botón '+' removido; alta de proyectos desde menú contextual
 
         # Listbox Proyectos
         self.listbox_proyectos = tk.Listbox(
@@ -106,20 +109,14 @@ class ChatUI:
         self.listbox_chats.bind('<Button-3>', self._mostrar_menu_chat)
 
         # Acciones de chat
-        self.btn_renombrar_chat = tk.Button(
-            self.frame_chats, text='✏️ Renombrar Conversación',
-            bg=DARK_ACCENT, fg=TEXT_COLOR, font=FONT, relief='flat',
-            command=self.renombrar_chat, activebackground=USER_BUBBLE
+        self.btn_renombrar_chat = self._make_button(
+            self.frame_chats, '✏️ Renombrar Conversación', command=self.renombrar_chat
         )
-        self.btn_eliminar_chat = tk.Button(
-            self.frame_chats, text='🗑 Eliminar Conversación',
-            bg='#b83a3a', fg='white', font=FONT, relief='flat',
-            command=self.eliminar_chat, activebackground='#7a2323'
+        self.btn_eliminar_chat = self._make_button(
+            self.frame_chats, '🗑 Eliminar Conversación', command=self.eliminar_chat, danger=True
         )
-        self.btn_borrar_hist = tk.Button(
-            self.frame_chats, text='🗑 Borrar Historial',
-            bg='#b83a3a', fg='white', font=FONT, relief='flat',
-            command=self.borrar_historial, activebackground='#7a2323'
+        self.btn_borrar_hist = self._make_button(
+            self.frame_chats, '🗑 Borrar Historial', command=self.borrar_historial, danger=True
         )
         self.btn_renombrar_chat.pack_forget()
         self.btn_eliminar_chat.pack_forget()
@@ -162,20 +159,59 @@ class ChatUI:
         # ---- Input abajo
         self.frame_input = tk.Frame(self.root, bg=DARK_PANEL)
         self.frame_input.pack(side='bottom', fill='x')
-        self.entry_msg = tk.Entry(self.frame_input, font=FONT, bg=DARK_ACCENT, fg=TEXT_COLOR,
-                                  insertbackground=TEXT_COLOR, relief='flat')
+        self.entry_msg = self._make_entry(self.frame_input)
         # Para que los botones a la derecha no se escondan al achicar, los anclamos a la derecha
-        self.btn_enviar = tk.Button(self.frame_input, text='Enviar', bg=USER_BUBBLE, fg='white',
-                                    font=FONT, relief='flat', activebackground=USER_BUBBLE,
-                                    command=self.enviar_mensaje)
-        self.btn_microfono = tk.Button(self.frame_input, text='🎤', font=('Segoe UI Emoji', 12),
-                                       bg=DARK_ACCENT, fg=TEXT_COLOR, relief='flat',
-                                       command=self.dictar_mensaje)
+        self.btn_enviar = self._make_button(self.frame_input, 'Enviar', command=self.enviar_mensaje, primary=True)
+        self.btn_microfono = self._make_button(self.frame_input, '🎤', command=self.dictar_mensaje)
         # Empaquetar primero los botones a la derecha, luego la entrada expandible a la izquierda
         self.btn_enviar.pack(side='right', padx=(5, 20), pady=12)
         self.btn_microfono.pack(side='right', padx=5, pady=12)
         self.entry_msg.pack(side='left', padx=(20, 5), pady=12, fill='x', expand=True)
         self.entry_msg.bind('<Return>', self.enviar_mensaje)
+
+    # ---------------- Estilos y factories ----------------
+    def _init_style(self):
+        try:
+            if tb:
+                # Use a modern dark theme from ttkbootstrap if available
+                self.style = tb.Style(theme='darkly')
+            else:
+                self.style = ttk.Style()
+                # Use a neutral modern theme and set colors
+                try:
+                    self.style.theme_use('clam')
+                except Exception:
+                    pass
+                self.style.configure('TButton', font=FONT)
+                self.style.configure('Primary.TButton', font=FONT, foreground='white', background=USER_BUBBLE)
+                self.style.map('Primary.TButton', background=[('active', USER_BUBBLE)])
+                self.style.configure('Danger.TButton', font=FONT, foreground='white', background='#b83a3a')
+                self.style.map('Danger.TButton', background=[('active', '#7a2323')])
+                self.style.configure('TEntry', fieldbackground=DARK_ACCENT, foreground=TEXT_COLOR)
+        except Exception:
+            self.style = ttk.Style()
+
+    def _make_button(self, parent, text, command=None, width=None, primary=False, danger=False):
+        if tb:
+            bootstyle = 'primary' if primary else ('danger' if danger else 'secondary')
+            return tb.Button(parent, text=text, command=command, width=width or 0, bootstyle=bootstyle)
+        else:
+            style = 'TButton'
+            if primary:
+                style = 'Primary.TButton'
+            elif danger:
+                style = 'Danger.TButton'
+            btn = ttk.Button(parent, text=text, command=command, style=style)
+            if width:
+                btn.config(width=width)
+            return btn
+
+    def _make_entry(self, parent):
+        if tb:
+            return tb.Entry(parent, font=FONT)
+        else:
+            e = ttk.Entry(parent, font=FONT)
+            return e
 
     # ---------------- Menús contextuales ----------------
     def _mostrar_menu_proyecto(self, event):
