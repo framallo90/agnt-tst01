@@ -216,33 +216,76 @@ class ChatUI:
 
     # ---------------- Menús contextuales ----------------
     def _mostrar_menu_proyecto(self, event):
+        has_selection = False
         try:
-            idx = self.listbox_proyectos.nearest(event.y)
+            count = self.listbox_proyectos.size()
+            if count > 0:
+                idx = self.listbox_proyectos.nearest(event.y)
+                # Validar si el click cayó dentro del bbox del item
+                bbox = self.listbox_proyectos.bbox(idx)
+                if bbox:
+                    y0, h = bbox[1], bbox[3]
+                    if y0 <= event.y <= y0 + h:
+                        self.listbox_proyectos.selection_clear(0, 'end')
+                        self.listbox_proyectos.selection_set(idx)
+                        has_selection = True
+                        # Actualizar estado interno manualmente
+                        try:
+                            self.seleccionar_proyecto()
+                        except Exception:
+                            pass
+                if not has_selection:
+                    # Click fuera de items: limpiar selección
+                    self.listbox_proyectos.selection_clear(0, 'end')
+            else:
+                self.listbox_proyectos.selection_clear(0, 'end')
+        except Exception:
             self.listbox_proyectos.selection_clear(0, 'end')
-            self.listbox_proyectos.selection_set(idx)
-            # Actualizar el estado interno para que self.proyecto_id refleje
-            # el proyecto seleccionado antes de mostrar el menú contextual.
-            # selection_set no dispara siempre el evento <<ListboxSelect>>,
-            # así que llamamos manualmente al manejador.
-            try:
-                self.seleccionar_proyecto()
-            except Exception:
-                # No queremos que un fallo aquí evite que aparezca el menú
-                pass
+
+        # Habilitar/Deshabilitar opciones según selección
+        try:
+            state = 'normal' if has_selection else 'disabled'
+            # 0: Renombrar Proyecto, 1: Eliminar Proyecto
+            self.menu_proyecto.entryconfig(0, state=state)
+            self.menu_proyecto.entryconfig(1, state=state)
+            # 'Nuevo Proyecto' siempre habilitado
         except Exception:
             pass
         self.menu_proyecto.tk_popup(event.x_root, event.y_root)
 
     def _mostrar_menu_chat(self, event):
+        has_selection = False
         try:
-            idx = self.listbox_chats.nearest(event.y)
+            count = self.listbox_chats.size()
+            if count > 0:
+                idx = self.listbox_chats.nearest(event.y)
+                bbox = self.listbox_chats.bbox(idx)
+                if bbox:
+                    y0, h = bbox[1], bbox[3]
+                    if y0 <= event.y <= y0 + h:
+                        self.listbox_chats.selection_clear(0, 'end')
+                        self.listbox_chats.selection_set(idx)
+                        has_selection = True
+                        try:
+                            self.seleccionar_chat()
+                        except Exception:
+                            pass
+                if not has_selection:
+                    self.listbox_chats.selection_clear(0, 'end')
+            else:
+                self.listbox_chats.selection_clear(0, 'end')
+        except Exception:
             self.listbox_chats.selection_clear(0, 'end')
-            self.listbox_chats.selection_set(idx)
-            # Ensure internal state updates (conversacion_id) before showing menu
-            try:
-                self.seleccionar_chat()
-            except Exception:
-                pass
+
+        # Habilitar/Deshabilitar opciones del menú de chats
+        try:
+            state_sel = 'normal' if has_selection else 'disabled'
+            # 0: Renombrar Conversación, 1: Eliminar Conversación, 2: Nuevo Chat, 3: sep, 4: Borrar Historial
+            self.menu_chat.entryconfig(0, state=state_sel)
+            self.menu_chat.entryconfig(1, state=state_sel)
+            self.menu_chat.entryconfig(4, state=state_sel)
+            # 'Nuevo Chat' solo habilitado si hay proyecto seleccionado
+            self.menu_chat.entryconfig(2, state='normal' if self.proyecto_id is not None else 'disabled')
         except Exception:
             pass
         self.menu_chat.tk_popup(event.x_root, event.y_root)
