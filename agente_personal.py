@@ -5,18 +5,25 @@ from typing import List, Tuple
 DB_NAME = 'agente_personal.db'
 
 class AgentePersonal:
-    def __init__(self, db_path: str = DB_NAME):
+    def __init__(self, db_path: str = DB_NAME, perform_migration: bool = True):
         # Permite usar la conexión desde varios hilos y activa las claves foráneas
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
+        # Reducir tiempos de espera en locks para no bloquear la UI al iniciar
+        try:
+            self.conn.execute('PRAGMA busy_timeout = 250')  # ms
+        except Exception:
+            pass
         # Lock para serializar el acceso a la base de datos cuando se usa la misma
         # conexión desde múltiples hilos (evita condiciones de carrera y errores
         # como FOREIGN KEY constraint failed debido a escrituras concurrentes).
         self.lock = threading.Lock()
         self.conn.execute('PRAGMA foreign_keys = ON')
         self._crear_tablas()
-        # Migración automática: si la BD fue creada sin ON DELETE CASCADE,
-        # reconstruimos las tablas dependientes para habilitar la cascada.
-        self._migrar_cascada_si_falta()
+        # Migración automática: opcional para evitar bloquear la UI en el hilo principal.
+        if perform_migration:
+            # Si la BD fue creada sin ON DELETE CASCADE, reconstruimos las tablas dependientes
+            # para habilitar la cascada.
+            self._migrar_cascada_si_falta()
 
     def _crear_tablas(self):
         cursor = self.conn.cursor()
@@ -215,6 +222,21 @@ class AgentePersonal:
         if row:
             return row[0]
         return None
+
+    def listar_mensajes(self, conversacion_id: int) -> List[Tuple[str, str]]:
+        """Devuelve (remitente, contenido) de una conversación ordenados por fecha e id.
+
+        Se ejecuta bajo lock para evitar condiciones de carrera con otros hilos que
+        escriban/lean simultáneamente en la misma conexión SQLite.
+        """
+        with self.lock:
+            cur = self.conn.cursor()
+            cur.execute(
+                'SELECT remitente, contenido FROM mensajes WHERE conversacion_id = ? '
+                'ORDER BY datetime(fecha) ASC, id ASC',
+                (conversacion_id,)
+            )
+            return cur.fetchall()
 
 if __name__ == '__main__':
     agente = AgentePersonal()

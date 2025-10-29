@@ -15,13 +15,25 @@ try:
     import ttkbootstrap as tb  # type: ignore
 except Exception:
     tb = None  # fallback to plain ttk
-import queue, threading, sqlite3
+import queue, threading, sqlite3, traceback
 
 from agente_personal import AgentePersonal
 from llama_local_helper import obtener_respuesta_llama_stream, obtener_respuesta_llama
 
 # --- Clase principal de la UI ---
 class ChatUI:
+    # --- Helper para recarga de listboxes ---
+    def _reload_listbox(self, listbox, items, seleccionar=None):
+        listbox.delete(0, tk.END)
+        for item in items:
+            listbox.insert(tk.END, item)
+        if seleccionar and seleccionar in items:
+            idx = items.index(seleccionar)
+            listbox.selection_clear(0, tk.END)
+            listbox.selection_set(idx)
+            listbox.see(idx)
+        else:
+            listbox.selection_clear(0, tk.END)
     """
     UI del agente personal: proyectos -> chats -> mensajes
     """
@@ -30,12 +42,7 @@ class ChatUI:
         self.root.title("Agente Personal")
 
         # Estado
-        self.agente = AgentePersonal(db_path='agente_personal.db')
-        # Asegura FK en la misma conexión
-        try:
-            self.agente.conn.execute('PRAGMA foreign_keys = ON')
-        except Exception:
-            pass
+        self.agente = None  # Se inicializa en run() para evitar bloquear el render inicial
 
         self.proyecto_actual = None
         self.proyecto_id = None
@@ -57,64 +64,72 @@ class ChatUI:
         self._grab_frames = None  # type: ignore
         self._grab_fs = 16000
 
-        self._init_style()
-        self._build_ui()
-        self._cargar_proyectos()
-        self._chequear_respuesta()
-
-    # ---------------- UI ----------------
-    def _build_ui(self):
-        self.root.geometry('900x600')
-        self.root.minsize(700, 400)
-
-        # Contenedor principal
+        # --- INICIALIZACIÓN DE WIDGETS ---
         self.frame_main = tk.Frame(self.root, bg=DARK_BG)
         self.frame_main.pack(fill='both', expand=True)
-
-        # ---- Menú lateral (izquierda)
+        self.frame_main.pack_propagate(True)
         self.frame_menu = tk.Frame(self.frame_main, bg=DARK_PANEL, width=220)
-        self.frame_menu.pack(side='left', fill='y')
-        self.frame_menu.pack_propagate(False)
-
-        # Header Proyectos
+        self.frame_menu.pack(side='left', fill='both', expand=True)
+        self.frame_menu.pack_propagate(True)
         hdr = tk.Frame(self.frame_menu, bg=DARK_PANEL)
         hdr.pack(fill='x', pady=(16, 8))
         tk.Label(hdr, text='Proyectos', bg=DARK_PANEL, fg=TEXT_COLOR,
                  font=('Segoe UI', 13, 'bold')).pack(side='left', padx=(12, 8))
-        # Botón '+' removido; alta de proyectos desde menú contextual
-
-        # Listbox Proyectos
         self.listbox_proyectos = tk.Listbox(
             self.frame_menu, bg=DARK_ACCENT, fg=TEXT_COLOR,
             selectbackground=USER_BUBBLE, selectforeground=TEXT_COLOR,
             relief='flat', font=FONT, highlightthickness=0
         )
-        self.listbox_proyectos.pack(fill='y', expand=True, padx=12)
+        self.listbox_proyectos.pack(fill='both', expand=True, padx=12)
         self.listbox_proyectos.bind('<<ListboxSelect>>', self.seleccionar_proyecto)
         self.listbox_proyectos.bind('<Button-3>', self._mostrar_menu_proyecto)
 
-        # (Botones de proyecto removidos; usar menú contextual)
-
-        # Panel de chats por proyecto
         self.frame_chats = tk.Frame(self.frame_menu, bg=DARK_PANEL)
-        self.frame_chats.pack(fill='x', padx=12, pady=(6, 12))
-
+        self.frame_chats.pack(fill='both', expand=True, padx=12, pady=(6, 12))
         top_chats = tk.Frame(self.frame_chats, bg=DARK_PANEL)
         top_chats.pack(fill='x')
         tk.Label(top_chats, text='Chats', bg=DARK_PANEL, fg=TEXT_COLOR,
                  font=('Segoe UI', 12, 'bold')).pack(side='left')
-        # El botón '+' para crear chats ya no se usa; se crea mediante el menú contextual.
-
         self.listbox_chats = tk.Listbox(
             self.frame_chats, bg=DARK_ACCENT, fg=TEXT_COLOR,
             selectbackground=AGENT_BUBBLE, selectforeground=TEXT_COLOR,
             relief='flat', font=FONT, highlightthickness=0, height=8
         )
-        self.listbox_chats.pack(fill='x', pady=(6, 6))
+        self.listbox_chats.pack(fill='both', expand=True, pady=(6, 6))
         self.listbox_chats.bind('<<ListboxSelect>>', self.seleccionar_chat)
         self.listbox_chats.bind('<Button-3>', self._mostrar_menu_chat)
+        self.frame_chat = tk.Frame(self.frame_main, bg=DARK_BG)
+        self.frame_chat.pack(side='right', fill='both', expand=True)
+        self.frame_chat.pack_propagate(True)
+        self.canvas = tk.Canvas(self.frame_chat, bg=DARK_BG, highlightthickness=0)
+        self.scrollbar = ttk.Scrollbar(self.frame_chat, orient='vertical', command=self.canvas.yview)
+        self.scrollable_frame = tk.Frame(self.canvas, bg=DARK_BG)
+        self.scrollable_frame.bind('<Configure>',
+                                   lambda e: self.canvas.configure(scrollregion=self.canvas.bbox('all')))
+        self.canvas.create_window((0, 0), window=self.scrollable_frame, anchor='nw')
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+        self.canvas.pack(side='left', fill='both', expand=True)
+        self.scrollbar.pack(side='right', fill='y')
 
-        # Acciones de chat
+        self.frame_input = tk.Frame(self.frame_chat, bg=DARK_BG)
+        self.frame_input.pack(side='bottom', fill='x', padx=8, pady=8)
+        self.entry_mensaje = self._make_entry(self.frame_input)
+        self.entry_mensaje.pack(side='left', fill='x', expand=True, padx=(0, 8))
+        self.entry_mensaje.bind('<Return>', self.enviar_mensaje)
+        self.btn_microfono = self._make_button(
+            self.frame_input, '🎤', command=self.dictar_mensaje, width=3, primary=True
+        )
+        self.btn_microfono.pack(side='left', padx=(0, 8))
+        self.btn_enviar = self._make_button(
+            self.frame_input, 'Enviar', command=self.enviar_mensaje, primary=True
+        )
+        self.btn_enviar.pack(side='right', padx=(8, 0))
+        self.btn_stop = self._make_button(self.frame_input, 'Stop', command=self._cancelar_respuesta, width=6, danger=True)
+        self.btn_stop.pack(side='right', padx=(4, 0))
+        self.btn_stop.config(state='disabled')
+        self.label_puntos = tk.Label(self.frame_input, text="", bg=DARK_BG, fg=AGENT_BUBBLE, font=FONT)
+        self.label_puntos.pack(side='left', padx=(8, 0))
+
         self.btn_renombrar_chat = self._make_button(
             self.frame_chats, '✏️ Renombrar Conversación', command=self.renombrar_chat
         )
@@ -128,23 +143,19 @@ class ChatUI:
         self.btn_eliminar_chat.pack_forget()
         self.btn_borrar_hist.pack_forget()
 
-        # Menús contextuales
         self.menu_proyecto = tk.Menu(self.root, tearoff=0)
         self.menu_proyecto.add_command(label='Renombrar Proyecto', command=self.renombrar_proyecto)
         self.menu_proyecto.add_command(label='Eliminar Proyecto', command=self.eliminar_proyecto)
         self.menu_proyecto.add_separator()
-        # Crear nuevos proyectos desde el menú contextual de Proyectos
         self.menu_proyecto.add_command(label='Nuevo Proyecto', command=self.crear_proyecto)
 
         self.menu_chat = tk.Menu(self.root, tearoff=0)
         self.menu_chat.add_command(label='Renombrar Conversación', command=self.renombrar_chat)
         self.menu_chat.add_command(label='Eliminar Conversación', command=self.eliminar_chat)
-        # Añadimos la opción de crear nuevo chat al menú contextual de chats
         self.menu_chat.add_command(label='Nuevo Chat', command=self.crear_chat)
         self.menu_chat.add_separator()
         self.menu_chat.add_command(label='Borrar Historial', command=self.borrar_historial)
 
-        # Menús alternativos con pista cuando no hay selección
         self.menu_proyecto_vacio = tk.Menu(self.root, tearoff=0)
         self.menu_proyecto_vacio.add_command(
             label='Seleccioná un proyecto para Renombrar/Eliminar', state='disabled')
@@ -152,62 +163,24 @@ class ChatUI:
         self.menu_proyecto_vacio.add_command(label='Nuevo Proyecto', command=self.crear_proyecto)
 
         self.menu_chat_vacio_proy = tk.Menu(self.root, tearoff=0)
-        self.menu_chat_vacio_proy.add_command(
-            label='Seleccioná un chat o creá uno nuevo', state='disabled')
-        self.menu_chat_vacio_proy.add_separator()
         self.menu_chat_vacio_proy.add_command(label='Nuevo Chat', command=self.crear_chat)
 
         self.menu_chat_vacio_sin_proy = tk.Menu(self.root, tearoff=0)
-        self.menu_chat_vacio_sin_proy.add_command(
-            label='Seleccioná un proyecto para crear chats', state='disabled')
+        self.menu_chat_vacio_sin_proy.add_command(label='Seleccioná un proyecto para crear chats', state='disabled')
         self.menu_chat_vacio_sin_proy.add_separator()
         self.menu_chat_vacio_sin_proy.add_command(label='Nuevo Chat', state='disabled')
 
-        # ---- Área de chat (derecha)
-        self.frame_chat = tk.Frame(self.frame_main, bg=DARK_BG)
-        self.frame_chat.pack(side='right', fill='both', expand=True)
+    # La carga inicial de proyectos e historial se difiere a run() para no bloquear el arranque
 
-        self.canvas = tk.Canvas(self.frame_chat, bg=DARK_BG, highlightthickness=0)
-        self.scrollbar = ttk.Scrollbar(self.frame_chat, orient='vertical', command=self.canvas.yview)
-        self.scrollable_frame = tk.Frame(self.canvas, bg=DARK_BG)
-        self.scrollable_frame.bind('<Configure>',
-                                   lambda e: self.canvas.configure(scrollregion=self.canvas.bbox('all')))
-        self.canvas.create_window((0, 0), window=self.scrollable_frame, anchor='nw')
-        self.canvas.configure(yscrollcommand=self.scrollbar.set)
-        self.canvas.pack(side='left', fill='both', expand=True)
-        self.scrollbar.pack(side='right', fill='y')
-
-        # Soporte scroll con rueda
-        self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)  # Windows
-        self.canvas.bind_all("<Button-4>", self._on_mousewheel)    # Linux up
-        self.canvas.bind_all("<Button-5>", self._on_mousewheel)    # Linux down
-
-        # ---- Status (pistas) justo encima del input
-        self.status_var = tk.StringVar(value='')
-        self.frame_status = tk.Frame(self.root, bg=DARK_PANEL)
-        self.frame_status.pack(side='bottom', fill='x')
-        self.lbl_status = tk.Label(self.frame_status, textvariable=self.status_var,
-                                   bg=DARK_PANEL, fg='#9aa0a6', font=('Segoe UI', 9))
-        self.lbl_status.pack(side='left', padx=(20, 5), pady=(2, 2))
-
-        # ---- Input abajo
-        self.frame_input = tk.Frame(self.root, bg=DARK_PANEL)
-        self.frame_input.pack(side='bottom', fill='x')
-        self.entry_msg = self._make_entry(self.frame_input)
-        # Para que los botones a la derecha no se escondan al achicar, los anclamos a la derecha
-        self.btn_enviar = self._make_button(self.frame_input, 'Enviar', command=self.enviar_mensaje, primary=True)
-        # Mic button style similar to modern assistants
-        self.btn_microfono = self._make_button(self.frame_input, '�', command=self.dictar_mensaje)
+    # --- Helper para manejo seguro de errores en UI ---
+    def _safe(self, func, *args, **kwargs):
         try:
-            # Slightly narrower to look like an icon button
-            self.btn_microfono.config(width=3)
-        except Exception:
-            pass
-        # Empaquetar primero los botones a la derecha, luego la entrada expandible a la izquierda
-        self.btn_enviar.pack(side='right', padx=(5, 20), pady=12)
-        self.btn_microfono.pack(side='right', padx=5, pady=12)
-        self.entry_msg.pack(side='left', padx=(20, 5), pady=12, fill='x', expand=True)
-        self.entry_msg.bind('<Return>', self.enviar_mensaje)
+            return func(*args, **kwargs)
+        except Exception as e:
+            self._set_status(f'Error: {e}', timeout=5000)
+            return None
+
+    # ---- Status (pistas) justo encima del input
 
     # ---------------- Estilos y factories ----------------
     def _init_style(self):
@@ -335,17 +308,20 @@ class ChatUI:
         except Exception:
             pass
         # Elegir menú según haya selección y proyecto actual
+        if self.proyecto_id is None:
+            # No mostrar ningún menú si no hay proyecto seleccionado
+            self._set_status('Seleccioná un proyecto para poder crear conversaciones.')
+            return
         if has_selection:
             menu = self.menu_chat
             self._set_status('Tip: podés renombrar o eliminar la conversación seleccionada.')
+            menu.tk_popup(event.x_root, event.y_root)
         else:
-            if self.proyecto_id is not None:
+            # Solo mostrar menú vacío si no hay chats, y evitar duplicados
+            if self.listbox_chats.size() == 0:
                 menu = self.menu_chat_vacio_proy
                 self._set_status('Tip: no hay conversación seleccionada. Creá una nueva desde el menú.')
-            else:
-                menu = self.menu_chat_vacio_sin_proy
-                self._set_status('Tip: seleccioná un proyecto para poder crear conversaciones.')
-        menu.tk_popup(event.x_root, event.y_root)
+                menu.tk_popup(event.x_root, event.y_root)
 
     def _set_status(self, msg: str, timeout: int = 3000):
         try:
@@ -394,10 +370,8 @@ class ChatUI:
             messagebox.showerror('Error', f'Ya existe un proyecto llamado "{nuevo}".')
 
     def eliminar_proyecto(self):
-        # Eliminación con transacción y confianza en ON DELETE CASCADE
         sel = self.listbox_proyectos.curselection()
         if not sel:
-            # nothing selected
             return
         nombre = self.listbox_proyectos.get(sel[0])
         with self.agente.lock:
@@ -405,46 +379,33 @@ class ChatUI:
             cur.execute('SELECT id FROM proyectos WHERE nombre=?', (nombre,))
             row = cur.fetchone()
         if not row:
-            messagebox.showerror('Error', 'Proyecto no encontrado en la base de datos.')
+            self._safe(messagebox.showerror, 'Error', 'Proyecto no encontrado en la base de datos.')
             self._cargar_proyectos()
             return
         proyecto_id = row[0]
-        if not messagebox.askyesno('Confirmar', f'¿Eliminar el proyecto "{nombre}" y todas sus conversaciones y mensajes?'):
+        if not self._safe(messagebox.askyesno, 'Confirmar', f'¿Eliminar el proyecto "{nombre}" y todas sus conversaciones y mensajes?'):
             return
         try:
             with self.agente.lock:
                 cur2 = self.agente.conn.cursor()
-                # Cancelar respuestas en curso de todas las conversaciones del proyecto
                 convs = cur2.execute('SELECT id FROM conversaciones WHERE proyecto_id=?', (proyecto_id,)).fetchall()
                 for (cid,) in convs:
                     ev = self._cancelaciones.get(cid)
                     if ev:
                         ev.set()
-                        # quitar del mapa para evitar fugas
                         self._cancelaciones.pop(cid, None)
+                self._cancelaciones = {k: v for k, v in self._cancelaciones.items() if k not in [c[0] for c in convs]}
                 cur2.execute('BEGIN IMMEDIATE')
-                # Borrar sólo el proyecto; la cascada se encarga del resto
                 cur2.execute('DELETE FROM proyectos WHERE id=?', (proyecto_id,))
                 self.agente.conn.commit()
         except Exception as e:
-            messagebox.showerror('Error', f'No se pudo eliminar el proyecto: {e}')
+            self._safe(messagebox.showerror, 'Error', f'No se pudo eliminar el proyecto: {e}')
             return
-
-        # Immediate UI update: remove the project from the listbox so user sees change at once
-        try:
-            sel_idx = sel[0]
-            self.listbox_proyectos.delete(sel_idx)
-        except Exception:
-            # if deletion from listbox fails, just reload all projects
-            pass
-
-        # Reset internal state and refresh UI components
         self.proyecto_actual = None
         self.proyecto_id = None
         self.conversacion_id = None
         self.root.update_idletasks()
-        messagebox.showinfo('Eliminado', f'Proyecto "{nombre}" eliminado correctamente.')
-        # Ensure full reload to keep consistency
+        self._safe(messagebox.showinfo, 'Eliminado', f'Proyecto "{nombre}" eliminado correctamente.')
         self._cargar_proyectos()
 
     def seleccionar_proyecto(self, event=None):
@@ -461,35 +422,36 @@ class ChatUI:
             return
 
         nombre = self.listbox_proyectos.get(sel[0])
-        cur = self.agente.conn.cursor()
-        cur.execute('SELECT id FROM proyectos WHERE nombre = ?', (nombre,))
-        row = cur.fetchone()
+        with self.agente.lock:
+            cur = self.agente.conn.cursor()
+            cur.execute('SELECT id FROM proyectos WHERE nombre = ?', (nombre,))
+            row = cur.fetchone()
         if row:
             self.proyecto_id = row[0]
             self.proyecto_actual = nombre
-            self._cargar_chats(self.proyecto_id)
+            # Buscar la última conversación utilizada (id más alto)
+            cur.execute('SELECT nombre FROM conversaciones WHERE proyecto_id=? ORDER BY id DESC LIMIT 1', (self.proyecto_id,))
+            chat_row = cur.fetchone()
+            seleccionar_nombre = chat_row[0] if chat_row else None
+            self._cargar_chats(self.proyecto_id, seleccionar_nombre=seleccionar_nombre)
             # (Botones de proyecto removidos)
 
     def _cargar_proyectos(self, seleccionar_nombre: str | None = None):
-        self.listbox_proyectos.delete(0, tk.END)
-        cur = self.agente.conn.cursor()
-        cur.execute('SELECT nombre FROM proyectos ORDER BY nombre ASC')
-        proyectos = [r[0] for r in cur.fetchall()]
-        for p in proyectos:
-            self.listbox_proyectos.insert(tk.END, p)
-
+        try:
+            with self.agente.lock:
+                cur = self.agente.conn.cursor()
+                cur.execute('SELECT nombre FROM proyectos ORDER BY nombre ASC')
+                proyectos = [r[0] for r in cur.fetchall()]
+        except Exception as e:
+            self._set_status(f'Error al cargar proyectos: {e}', 5000)
+            proyectos = []
+        self._reload_listbox(self.listbox_proyectos, proyectos, seleccionar_nombre)
         if proyectos:
-            idx = 0
-            if seleccionar_nombre and seleccionar_nombre in proyectos:
-                idx = proyectos.index(seleccionar_nombre)
-            self.listbox_proyectos.selection_clear(0, tk.END)
-            self.listbox_proyectos.selection_set(idx)
             self.seleccionar_proyecto()
         else:
-            # Sin proyectos: no crear conversaciones libres automáticamente.
             self.proyecto_actual = None
             self.proyecto_id = None
-            self.listbox_chats.delete(0, tk.END)
+            self._reload_listbox(self.listbox_chats, [])
             self.conversacion_id = None
             self._cargar_historial()
 
@@ -519,7 +481,6 @@ class ChatUI:
         self._cargar_chats(self.proyecto_id, seleccionar_nombre=nuevo)
 
     def eliminar_chat(self):
-        # Eliminación simple con cascada de mensajes
         sel = self.listbox_chats.curselection()
         if not sel:
             return
@@ -528,36 +489,25 @@ class ChatUI:
             return
         conv_id = self._chat_map[idx]
         nombre = self.listbox_chats.get(idx)
-        if not messagebox.askyesno('Confirmar', f'¿Eliminar la conversación "{nombre}" y su historial?'):
+        if not self._safe(messagebox.askyesno, 'Confirmar', f'¿Eliminar la conversación "{nombre}" y su historial?'):
             return
         try:
             with self.agente.lock:
                 cur2 = self.agente.conn.cursor()
-                # Cancelar respuesta en curso asociada a esta conversación
                 ev = self._cancelaciones.get(conv_id)
                 if ev:
                     ev.set()
                     self._cancelaciones.pop(conv_id, None)
+                self._cancelaciones = {k: v for k, v in self._cancelaciones.items() if k != conv_id}
                 cur2.execute('BEGIN IMMEDIATE')
                 cur2.execute('DELETE FROM conversaciones WHERE id=?', (conv_id,))
                 self.agente.conn.commit()
         except Exception as e:
-            messagebox.showerror('Error', f'No se pudo eliminar la conversación: {e}')
+            self._safe(messagebox.showerror, 'Error', f'No se pudo eliminar la conversación: {e}')
             return
-
-        # Immediate UI update: remove chat entry from listbox so it's not visible anymore
-        try:
-            self.listbox_chats.delete(idx)
-            try:
-                del self._chat_map[idx]
-            except Exception:
-                pass
-        except Exception:
-            pass
-
         self.conversacion_id = None
         self.root.update_idletasks()
-        messagebox.showinfo('Eliminado', f'Conversación "{nombre}" eliminada correctamente.')
+        self._safe(messagebox.showinfo, 'Eliminado', f'Conversación "{nombre}" eliminada correctamente.')
         self._cargar_chats(self.proyecto_id)
 
     def seleccionar_chat(self, event=None):
@@ -574,28 +524,30 @@ class ChatUI:
         self.btn_borrar_hist.pack(pady=(0, 6), fill='x')
 
     def _cargar_chats(self, proyecto_id: int, seleccionar_nombre: str | None = None):
-        self.listbox_chats.delete(0, tk.END)
-        self._chat_map = []
-        cur = self.agente.conn.cursor()
-        cur.execute('SELECT nombre, id FROM conversaciones WHERE proyecto_id=? ORDER BY id ASC',
-                    (proyecto_id,))
-        rows = cur.fetchall()
+        try:
+            with self.agente.lock:
+                cur = self.agente.conn.cursor()
+                cur.execute('SELECT nombre, id FROM conversaciones WHERE proyecto_id=? ORDER BY id ASC', (proyecto_id,))
+                rows = cur.fetchall()
+        except Exception as e:
+            self._set_status(f'Error al cargar conversaciones: {e}', 5000)
+            rows = []
         nombres = []
+        self._chat_map = []
         for nombre, cid in rows:
             n = nombre or f"Chat #{cid}"
             nombres.append(n)
             self._chat_map.append(cid)
-            self.listbox_chats.insert(tk.END, n)
-
-        if nombres:
-            idx = 0
-            if seleccionar_nombre and seleccionar_nombre in nombres:
-                idx = nombres.index(seleccionar_nombre)
-            self.listbox_chats.selection_clear(0, tk.END)
+        self._reload_listbox(self.listbox_chats, nombres, seleccionar_nombre)
+        # Seleccionar la conversación indicada, si existe
+        if seleccionar_nombre and seleccionar_nombre in nombres:
+            idx = nombres.index(seleccionar_nombre)
+            self.listbox_chats.selection_clear(0, 'end')
             self.listbox_chats.selection_set(idx)
+            self.listbox_chats.event_generate('<<ListboxSelect>>')
+        elif nombres:
             self.seleccionar_chat()
         else:
-            # No crear chats automáticamente; quedar en estado sin conversación
             self.conversacion_id = None
             self._cargar_historial()
 
@@ -610,28 +562,47 @@ class ChatUI:
         if self.conversacion_id is None:
             return
 
-        cur = self.agente.conn.cursor()
-        cur.execute('SELECT remitente, contenido FROM mensajes WHERE conversacion_id = ? '
-                    'ORDER BY datetime(fecha) ASC, id ASC', (self.conversacion_id,))
-        for remitente, contenido in cur.fetchall():
+        for remitente, contenido in self.agente.listar_mensajes(self.conversacion_id):
             self._insertar_burbuja(remitente, contenido)
 
         self.root.after(50, lambda: self.canvas.yview_moveto(1.0))
 
     def _insertar_burbuja(self, remitente, contenido):
         frame = tk.Frame(self.scrollable_frame, bg=DARK_BG)
+        # Calcular el ancho disponible dinámicamente
+        frame.update_idletasks()
+        available_width = self.scrollable_frame.winfo_width() or 300
+        wrap = max(200, available_width - 100)  # margen para burbuja
         if remitente == 'Usuario':
-            bubble = tk.Label(frame, text=contenido, bg=USER_BUBBLE, fg='white',
-                              font=FONT, wraplength=600, justify='right',
-                              padx=12, pady=8, bd=0, relief='flat')
-            bubble.pack(anchor='e', padx=10, pady=4)
+            bubble = tk.Message(frame, text=contenido, bg=USER_BUBBLE, fg='white',
+                               font=FONT, width=wrap, padx=12, pady=8)
+            bubble.pack(anchor='e', padx=10, pady=4, fill='x')
             frame.pack(fill='x', anchor='e', padx=(60, 10))
         else:
-            bubble = tk.Label(frame, text=contenido, bg=AGENT_BUBBLE, fg=TEXT_COLOR,
-                              font=FONT, wraplength=600, justify='left',
-                              padx=12, pady=8, bd=0, relief='flat')
-            bubble.pack(anchor='w', padx=10, pady=4)
+            bubble = tk.Message(frame, text=contenido, bg=AGENT_BUBBLE, fg=TEXT_COLOR,
+                               font=FONT, width=wrap, padx=12, pady=8)
+            bubble.pack(anchor='w', padx=10, pady=4, fill='x')
             frame.pack(fill='x', anchor='w', padx=(10, 60))
+
+
+    def _actualizar_burbuja_agente(self, nuevo_texto):
+        """Actualiza el texto de la última burbuja del agente en el chat actual. Si no existe, la crea."""
+        # Solo actualiza si la conversación no cambió
+        if self.conversacion_id is None:
+            return
+        burbuja_actualizada = False
+        for frame in reversed(self.scrollable_frame.winfo_children()):
+            for widget in frame.winfo_children():
+                # Actualiza tanto tk.Label (versión anterior) como tk.Message (versión nueva)
+                if isinstance(widget, (tk.Label, tk.Message)) and widget.cget('bg') == AGENT_BUBBLE:
+                    widget.config(text=nuevo_texto)
+                    burbuja_actualizada = True
+                    break
+            if burbuja_actualizada:
+                break
+        # Si no existe la burbuja (por cambio de chat), la crea al final
+        if not burbuja_actualizada:
+            self._insertar_burbuja('Agente', nuevo_texto)
 
     def _guardar_mensaje(self, remitente, contenido):
         with self.agente.lock:
@@ -652,12 +623,17 @@ class ChatUI:
             self.agente.conn.commit()
 
     def enviar_mensaje(self, event=None):
-        texto = self.entry_msg.get().strip()
+        texto = self.entry_mensaje.get().strip()
         if not texto:
             return
+        # Deshabilitar input y botón de enviar
+        self.entry_mensaje.config(state='disabled')
+        self.btn_enviar.config(state='disabled')
+        # Habilitar Stop
+        self.btn_stop.config(state='normal')
         # Guardar mensaje del usuario (creará conversación si falta)
         self._guardar_mensaje('Usuario', texto)
-        self.entry_msg.delete(0, tk.END)
+        self.entry_mensaje.delete(0, tk.END)
         self._cargar_historial()
 
         # Burbuja "pensando..."
@@ -670,24 +646,37 @@ class ChatUI:
         # Resetear/crear token de cancelación para esta conversación
         ev = threading.Event()
         self._cancelaciones[conv_id_snapshot] = ev
+        def reactivar_input():
+            self.entry_mensaje.config(state='normal')
+            self.btn_enviar.config(state='normal')
+            self.btn_stop.config(state='disabled')
         if self.stream_enabled:
-            threading.Thread(target=self._respuesta_streaming,
-                             args=(texto, conv_id_snapshot, ev), daemon=True).start()
+            def hilo_stream():
+                self._respuesta_streaming(texto, conv_id_snapshot, ev)
+                self.root.after(0, reactivar_input)
+            threading.Thread(target=hilo_stream, daemon=True).start()
         else:
-            threading.Thread(target=self._respuesta_nostream,
-                             args=(texto, conv_id_snapshot, ev), daemon=True).start()
+            def hilo_nostream():
+                self._respuesta_nostream(texto, conv_id_snapshot, ev)
+                self.root.after(0, reactivar_input)
+            threading.Thread(target=hilo_nostream, daemon=True).start()
+    
+    def _cancelar_respuesta(self):
+        # Cancela la respuesta actual del modelo
+        conv_id_snapshot = self.conversacion_id
+        ev = self._cancelaciones.get(conv_id_snapshot)
+        if ev:
+            ev.set()
+        self.btn_stop.config(state='disabled')
 
     def _armar_historial(self, conversacion_id: int, texto_usuario: str):
-        with self.agente.lock:
-            cur = self.agente.conn.cursor()
-            cur.execute('SELECT remitente, contenido FROM mensajes WHERE conversacion_id = ? '
-                        'ORDER BY datetime(fecha) ASC, id ASC', (conversacion_id,))
-            rows = cur.fetchall()
+        rows = self.agente.listar_mensajes(conversacion_id)
         historial = [{'role': 'user' if r == 'Usuario' else 'assistant', 'content': c}
                      for r, c in rows]
         if not historial or historial[-1]['role'] != 'user':
             historial.append({'role': 'user', 'content': texto_usuario})
         return historial
+
 
     def _respuesta_nostream(self, texto_usuario: str, conversacion_id: int, cancel_event: threading.Event):
         try:
@@ -728,14 +717,11 @@ class ChatUI:
         try:
             respuesta_final = obtener_respuesta_llama_stream(historial, actualizar_burbuja)
         except Exception as e:
-            try:
-                respuesta_final = obtener_respuesta_llama(historial)
-            except Exception:
-                respuesta_final = f"[Error del modelo] {e}"
-            self.root.after(0, self._actualizar_burbuja_agente, respuesta_final)
-
+            respuesta_final = f"[Error de modelo] {e}"
         if cancel_event.is_set():
-            return
+            return  # conversación eliminada o cancelada
+        self.animando = False
+        self.root.after(0, self._actualizar_burbuja_agente, respuesta_final)
         try:
             with self.agente.lock:
                 if cancel_event.is_set():
@@ -746,66 +732,28 @@ class ChatUI:
                 self.agente.conn.commit()
         except Exception:
             return
+        # Limpieza del token de cancelación si sigue siendo el mismo
         self._cancelaciones.pop(conversacion_id, None)
         self.respuesta_queue.put(True)
 
-    def _animar_puntos(self):
-        if self.animando:
-            frames = [w for w in self.scrollable_frame.winfo_children() if isinstance(w, tk.Frame)]
-            if frames:
-                frame = frames[-1]
-                for widget in frame.winfo_children():
-                    if isinstance(widget, tk.Label):
-                        t = widget.cget('text')
-                        widget.config(text='.' if t.endswith('...') else '..' if t.endswith('.') else
-                                      '...' if t.endswith('..') else '...')
-            self.root.after(400, self._animar_puntos)
-
-    def _actualizar_burbuja_agente(self, texto: str):
-        frames = [w for w in self.scrollable_frame.winfo_children() if isinstance(w, tk.Frame)]
-        if not frames:
-            return
-        frame = frames[-1]
-        for widget in frame.winfo_children():
-            if isinstance(widget, tk.Label):
-                widget.config(text=texto)
-        self.root.after(10, lambda: self.canvas.yview_moveto(1.0))
-
-    def _chequear_respuesta(self):
-        try:
-            if self.respuesta_queue.get_nowait():
-                self.animando = False
-                self._cargar_historial()
-        except queue.Empty:
-            pass
-        self.root.after(100, self._chequear_respuesta)
-
-    # ---------------- Utilidades varias ----------------
+    # ---------------- Dictado de voz ----------------
     def dictar_mensaje(self):
         """Toggle grabación: click para empezar, click para detener y transcribir + enviar."""
         try:
             import speech_recognition as sr
         except ImportError:
+            self._safe(messagebox.showerror, 'Falta dependencia', 'Necesitás instalar SpeechRecognition para transcribir voz.')
             self._set_status('Falta SpeechRecognition. Instalá: pip install SpeechRecognition', timeout=6000)
-            messagebox.showerror('Falta dependencia', 'Necesitás instalar SpeechRecognition para transcribir voz.')
             return
 
-        # Si ya estamos grabando: detener y procesar
         if self._grabando:
             if self._grab_stop:
                 self._grab_stop.set()
             th = self._grab_thread
-            try:
-                if th:
-                    th.join(timeout=2.0)
-            except Exception:
-                pass
+            self._safe(lambda: th and th.join(timeout=2.0))
             self._grabando = False
-            try:
-                self.btn_microfono.config(text='🎙')
-            except Exception:
-                pass
-            # Procesar frames capturados
+            self._safe(self.btn_microfono.config, text='🎙')
+            self._stop_recording_ui()
             try:
                 import numpy as np
                 frames = self._grab_frames or []
@@ -823,46 +771,33 @@ class ChatUI:
                     texto = ''
                     self._set_status('No se entendió el audio. Intentá de nuevo.', timeout=4000)
                 except Exception as e:
-                    messagebox.showerror('Transcripción', f'Error: {e}')
+                    self._safe(messagebox.showerror, 'Transcripción', f'Error: {e}')
                     texto = ''
                 if texto:
                     self.root.after(0, lambda: self._insertar_y_enviar(texto))
             except Exception as e:
-                messagebox.showerror('Dictado de voz', str(e))
+                self._safe(messagebox.showerror, 'Dictado de voz', str(e))
             finally:
                 self._grab_thread = None
                 self._grab_frames = []
                 self._grab_stop = None
             return
 
-        # Iniciar grabación con sounddevice como backend principal
         try:
             import sounddevice as sd
             import numpy as np
         except Exception as e:
-            # Fallback a una captura breve con Microphone (sin toggle completo)
-            try:
-                r = sr.Recognizer()
-                with sr.Microphone() as source:
-                    self._set_status('Grabando (fallback 5s)…', timeout=5000)
-                    audio = r.listen(source, timeout=5, phrase_time_limit=5)
-                    self._set_status('Procesando…', timeout=3000)
-                    texto = r.recognize_google(audio, language='es-AR')
-                    self.root.after(0, lambda: self._insertar_y_enviar(texto))
-                return
-            except Exception as e2:
-                messagebox.showerror('Dictado de voz', f'No se pudo capturar audio: {e2}')
-                return
+            self._safe(messagebox.showerror, 'Audio', f'No se pudo inicializar sounddevice: {e}\nAsegúrate de que sounddevice esté instalado y el micrófono esté disponible.')
+            self._set_status('Error de audio: revisa la configuración del micrófono.', timeout=6000)
+            return
 
         self._grab_stop = threading.Event()
         self._grab_frames = []
 
-        def cb(indata, frames, time_, status):  # sounddevice callback
+        def cb(indata, frames, time_, status):
             try:
                 if status:
-                    # podemos loguear status si hace falta
                     pass
-                # Copia para evitar referencias a buffer mutable
                 self._grab_frames.append(indata.copy())
             except Exception:
                 pass
@@ -870,46 +805,153 @@ class ChatUI:
         def loop():
             try:
                 with sd.InputStream(samplerate=self._grab_fs, channels=1, dtype='int16', callback=cb):
+                    self._start_recording_ui()
                     self._set_status('Grabando… click de nuevo para detener.', timeout=0)
                     while self._grab_stop and not self._grab_stop.is_set():
                         sd.sleep(100)
             except Exception as e:
-                messagebox.showerror('Audio', f'Error de entrada de audio: {e}')
+                self._safe(messagebox.showerror, 'Audio', f'Error de entrada de audio: {e}')
+            finally:
+                self._stop_recording_ui()
 
         self._grab_thread = threading.Thread(target=loop, daemon=True)
         self._grab_thread.start()
         self._grabando = True
+        self._safe(self.btn_microfono.config, text='⏹')
+
+    # ---------------- Entrada de texto ----------------
+    def _insertar_y_enviar(self, texto):
+        if not texto:
+            return
+        self._guardar_mensaje('Usuario', texto)
+        self._cargar_historial()
+        self._insertar_burbuja('Usuario', texto)
+        # Corrección: el campo de entrada es entry_mensaje
+        self.entry_mensaje.delete(0, tk.END)
+        self.animando = True
+        self._animar_puntos()
+
+        # Snapshot para responder sobre la misma conversación aunque el usuario cambie de selección
+        conv_id_snapshot = self.conversacion_id
+        # Resetear/crear token de cancelación para esta conversación
+        ev = threading.Event()
+        self._cancelaciones[conv_id_snapshot] = ev
+        if self.stream_enabled:
+            threading.Thread(target=self._respuesta_streaming,
+                             args=(texto, conv_id_snapshot, ev), daemon=True).start()
+        else:
+            threading.Thread(target=self._respuesta_nostream,
+                             args=(texto, conv_id_snapshot, ev), daemon=True).start()
+
+    def _enfocar_input(self, event=None):
+        self.entry_mensaje.focus()
+        self.entry_mensaje.select_range(tk.END, tk.END)
+
+    def _animar_puntos(self):
+        if not self.animando:
+            return
+        texto_actual = self.label_puntos.cget("text")
+        if texto_actual == "":
+            nuevo_texto = "."
+        else:
+            puntos = texto_actual.count(".")
+            if puntos >= 3:
+                nuevo_texto = ""
+            else:
+                nuevo_texto = texto_actual + "."
+        self.label_puntos.config(text=nuevo_texto)
+        self.root.after(500, self._animar_puntos)
+
+    # ---------------- Startup y carga inicial ----------------
+    def _cargar_historial_global(self):
+        # Cargar historial de la última conversación activa al iniciar
         try:
-            self.btn_microfono.config(text='⏹')
+            conv_id = None
+            with self.agente.lock:
+                cur = self.agente.conn.cursor()
+                cur.execute('SELECT id, nombre FROM conversaciones WHERE proyecto_id IS NULL ORDER BY id DESC LIMIT 1')
+                row = cur.fetchone()
+                if row:
+                    conv_id = row[0]
+            if conv_id is not None:
+                # Actualizar estado fuera del lock para evitar deadlocks con listar_mensajes()
+                self.conversacion_id = conv_id
+                self.proyecto_id = None
+                self.proyecto_actual = None
+                # Solo cargar historial de la conversación libre sin tocar lista de chats
+                self._cargar_historial()
         except Exception:
             pass
 
-    def _insertar_y_enviar(self, texto: str):
-        """Inserta el texto transcrito en el cuadro y dispara el envío para que el modelo responda."""
+    def on_closing(self):
+        # Confirmar antes de salir
+        if not self._safe(messagebox.askyesno, 'Confirmar salida', '¿Estás seguro que querés salir?'):
+            return
+        # Cancelar cualquier respuesta en curso
+        for ev in self._cancelaciones.values():
+            ev.set()
+        self.root.destroy()
+
+    def run(self):
+        self._init_style()
+        self.frame_main.tk_setPalette(background=DARK_BG)
+        self.root.configure(bg=DARK_BG)
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+        # Status var para pistas
+        self.status_var = tk.StringVar()
+        status_label = tk.Label(self.frame_main, textvariable=self.status_var, bg=DARK_BG, fg=TEXT_COLOR,
+                                font=('Segoe UI', 10))
+        status_label.pack(side='bottom', fill='x')
+        # Mostrar ventana antes de operaciones de carga para asegurar visibilidad inmediata
+        self.root.deiconify()
+        self.root.update_idletasks()
+        # Inicializar acceso a datos después de mostrar ventana para evitar bloquear el arranque visual
         try:
-            self.entry_msg.delete(0, tk.END)
-            texto = (texto or '').strip()
-            if not texto:
-                # Si no hay nada útil, no enviar
-                return
-            self.entry_msg.insert(0, texto)
-            # Disparar envío (misma conversación actual o autogenerará)
-            self.enviar_mensaje()
-        except Exception:
-            pass
+            self.status_var.set('Inicializando base de datos…')
+            # Evitar migración en el hilo principal
+            self.agente = AgentePersonal(db_path='agente_personal.db', perform_migration=False)
+            try:
+                self.agente.conn.execute('PRAGMA foreign_keys = ON')
+            except Exception:
+                pass
+        finally:
+            # Limpiar status breve
+            self.root.after(500, lambda: self.status_var.set(''))
+        # Diferir cargas iniciales para no bloquear el render inicial
+        self.root.after(0, self._cargar_proyectos)
+        self.root.after(0, self._cargar_historial_global)
+        # Enfocar entrada de texto al iniciar
+        self.root.after(1000, self._enfocar_input)
+        # Bind global para mousewheel (scroll en canvas)
+        self.root.bind_all('<MouseWheel>', self._on_mousewheel)
+        # (Linux)
+        self.root.bind_all('<Button-4>', self._on_mousewheel)
+        self.root.bind_all('<Button-5>', self._on_mousewheel)
+        self.root.mainloop()
 
     def borrar_historial(self):
-        if not self.conversacion_id:
+        # Implementación básica: limpia el historial de la conversación actual
+        if self.conversacion_id is None:
+            self._set_status('No hay conversación seleccionada.', 3000)
             return
-        if not messagebox.askyesno('Confirmar', '¿Borrar todos los mensajes de esta conversación?'):
-            return
-        cur = self.agente.conn.cursor()
-        cur.execute('DELETE FROM mensajes WHERE conversacion_id = ?', (self.conversacion_id,))
-        self.agente.conn.commit()
-        self._cargar_historial()
-
+        try:
+            with self.agente.lock:
+                cur = self.agente.conn.cursor()
+                cur.execute('DELETE FROM mensajes WHERE conversacion_id=?', (self.conversacion_id,))
+                self.agente.conn.commit()
+            self._set_status('Historial borrado correctamente.', 3000)
+            self._cargar_historial()
+        except Exception as e:
+            self._set_status(f'Error al borrar historial: {e}', 5000)
 
 if __name__ == '__main__':
-    root = tk.Tk()
-    app = ChatUI(root)
-    root.mainloop()
+    import traceback
+    try:
+        root = tk.Tk()
+        app = ChatUI(root)
+        # Volver al flujo original probado: inicialización completa en run()
+        app.run()
+    except Exception as e:
+        print('[FATAL] Error al iniciar la UI:', e)
+        traceback.print_exc()
+        raise

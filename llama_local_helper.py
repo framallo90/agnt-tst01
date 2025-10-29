@@ -52,14 +52,15 @@ def _to_chat_messages(historial: List[Dict[str, str]]) -> List[Dict[str, str]]:
 def obtener_respuesta_llama(historial: List[Dict[str, str]]) -> str:
     """Camino no-stream: usa llama-cpp si está disponible; fallback si no."""
     llm = _get_llm()
+    # Inyectar sistema para español y saludo personalizado
+    system_prompt = {"role": "system", "content": "Responde siempre en español y llama al usuario Facu en tus respuestas."}
+    messages = [system_prompt] + _to_chat_messages(historial)
     if llm is None:
         # Fallback estable
         ultimo_user = next((m["content"] for m in reversed(historial) if m.get("role") == "user"), "")
-        return f"Recibí tu mensaje: '{ultimo_user}'. (Respuesta demo no-stream)"
-
-    messages = _to_chat_messages(historial)
+        return f"Hola Facu, recibí tu mensaje: '{ultimo_user}'. (Respuesta demo no-stream)"
     try:
-        out = llm.create_chat_completion(messages=messages)
+        out = llm.create_chat_completion(messages=messages, max_tokens=512)
         return out["choices"][0]["message"]["content"].strip()
     except Exception as e:
         return f"[Error LLaMA] {e}"
@@ -68,7 +69,9 @@ def obtener_respuesta_llama(historial: List[Dict[str, str]]) -> str:
 def obtener_respuesta_llama_stream(historial: List[Dict[str, str]], callback: Callable[[str], None], delay: float = 0.0) -> str:
     """Camino stream: devuelve texto final y publica parciales en callback."""
     llm = _get_llm()
-    messages = _to_chat_messages(historial)
+    # Inyectar sistema para español y saludo personalizado
+    system_prompt = {"role": "system", "content": "Responde siempre en español y llama al usuario Facu en tus respuestas."}
+    messages = [system_prompt] + _to_chat_messages(historial)
 
     if llm is None:
         # Fallback a no-stream con particionado simple para simular streaming
@@ -87,7 +90,7 @@ def obtener_respuesta_llama_stream(historial: List[Dict[str, str]], callback: Ca
 
     acumulado = ""
     try:
-        for chunk in llm.create_chat_completion(messages=messages, stream=True):
+        for chunk in llm.create_chat_completion(messages=messages, stream=True, max_tokens=512):
             delta = ""
             try:
                 delta = chunk["choices"][0]["delta"].get("content", "")
