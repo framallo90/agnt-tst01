@@ -101,12 +101,19 @@ class ChatUI:
         self.frame_chat = tk.Frame(self.frame_main, bg=DARK_BG)
         self.frame_chat.pack(side='right', fill='both', expand=True)
         self.frame_chat.pack_propagate(True)
+        # Chat area: canvas and scrollbar directly in frame_chat (layout original)
         self.canvas = tk.Canvas(self.frame_chat, bg=DARK_BG, highlightthickness=0)
         self.scrollbar = ttk.Scrollbar(self.frame_chat, orient='vertical', command=self.canvas.yview)
         self.scrollable_frame = tk.Frame(self.canvas, bg=DARK_BG)
-        self.scrollable_frame.bind('<Configure>',
-                                   lambda e: self.canvas.configure(scrollregion=self.canvas.bbox('all')))
-        self.canvas.create_window((0, 0), window=self.scrollable_frame, anchor='nw')
+        self.scrollable_frame.bind(
+            '<Configure>',
+            lambda e: self.canvas.configure(scrollregion=self.canvas.bbox('all'))
+        )
+        self._scroll_window = self.canvas.create_window((0, 0), window=self.scrollable_frame, anchor='nw')
+        self.canvas.bind(
+            '<Configure>',
+            lambda e: self.canvas.itemconfigure(self._scroll_window, width=e.width)
+        )
         self.canvas.configure(yscrollcommand=self.scrollbar.set)
         self.canvas.pack(side='left', fill='both', expand=True)
         self.scrollbar.pack(side='right', fill='y')
@@ -409,32 +416,41 @@ class ChatUI:
         self._cargar_proyectos()
 
     def seleccionar_proyecto(self, event=None):
-        sel = self.listbox_proyectos.curselection()
-        if not sel:
-            # No crear ni borrar conversaciones al deseleccionar proyecto.
-            # Solo ocultar acciones de proyecto y dejar el chat actual como está.
-            self.proyecto_actual = None
-            self.proyecto_id = None
-            # (Botones de proyecto removidos)
-            self.btn_renombrar_chat.pack_forget()
-            self.btn_eliminar_chat.pack_forget()
-            self.btn_borrar_hist.pack_forget()
-            return
+        try:
+            sel = self.listbox_proyectos.curselection()
+            if not sel:
+                return
 
-        nombre = self.listbox_proyectos.get(sel[0])
-        with self.agente.lock:
-            cur = self.agente.conn.cursor()
-            cur.execute('SELECT id FROM proyectos WHERE nombre = ?', (nombre,))
-            row = cur.fetchone()
-        if row:
-            self.proyecto_id = row[0]
+            idx = sel[0]
+            nombre = self.listbox_proyectos.get(idx)
+            proyecto_id = None
+            with self.agente.lock:
+                cur = self.agente.conn.cursor()
+                cur.execute('SELECT id FROM proyectos WHERE nombre = ?', (nombre,))
+                row = cur.fetchone()
+                if row:
+                    proyecto_id = row[0]
+
+            if proyecto_id is None:
+                self._set_status('Proyecto no encontrado en la base de datos.', 4000)
+                return
+
+            self.proyecto_id = proyecto_id
             self.proyecto_actual = nombre
-            # Buscar la última conversación utilizada (id más alto)
-            cur.execute('SELECT nombre FROM conversaciones WHERE proyecto_id=? ORDER BY id DESC LIMIT 1', (self.proyecto_id,))
-            chat_row = cur.fetchone()
-            seleccionar_nombre = chat_row[0] if chat_row else None
-            self._cargar_chats(self.proyecto_id, seleccionar_nombre=seleccionar_nombre)
-            # (Botones de proyecto removidos)
+            # Cargar chats y seleccionar el primero si existe
+            self._cargar_chats(self.proyecto_id)
+            if self._chat_map:
+                self.listbox_chats.selection_clear(0, 'end')
+                self.listbox_chats.selection_set(0)
+                self.listbox_chats.event_generate('<<ListboxSelect>>')
+            else:
+                self.conversacion_id = None
+                self._cargar_historial()
+                self.btn_renombrar_chat.pack_forget()
+                self.btn_eliminar_chat.pack_forget()
+                self.btn_borrar_hist.pack_forget()
+        except Exception as e:
+            self._set_status(f'Error al seleccionar proyecto: {e}', 5000)
 
     def _cargar_proyectos(self, seleccionar_nombre: str | None = None):
         try:
@@ -546,8 +562,12 @@ class ChatUI:
             self.listbox_chats.selection_set(idx)
             self.listbox_chats.event_generate('<<ListboxSelect>>')
         elif nombres:
-            self.seleccionar_chat()
+            # Si hay chats pero no se especificó uno, seleccionar el primero
+            self.listbox_chats.selection_clear(0, 'end')
+            self.listbox_chats.selection_set(0)
+            self.listbox_chats.event_generate('<<ListboxSelect>>')
         else:
+            # No hay chats: dejar el área de chat en blanco
             self.conversacion_id = None
             self._cargar_historial()
 
@@ -557,14 +577,22 @@ class ChatUI:
     def _cargar_historial(self):
         if not hasattr(self, 'scrollable_frame'):
             return
+        # Limpia todos los frames previos correctamente
         for w in self.scrollable_frame.winfo_children():
-            w.destroy()
+            try:
+                w.destroy()
+            except Exception:
+                pass
+        self.scrollable_frame.update_idletasks()
+        self.canvas.update_idletasks()
         if self.conversacion_id is None:
+            self.canvas.yview_moveto(0.0)
             return
-
+        # Inserta solo los mensajes del chat seleccionado
         for remitente, contenido in self.agente.listar_mensajes(self.conversacion_id):
             self._insertar_burbuja(remitente, contenido)
-
+        self.scrollable_frame.update_idletasks()
+        self.canvas.update_idletasks()
         self.root.after(50, lambda: self.canvas.yview_moveto(1.0))
 
     def _insertar_burbuja(self, remitente, contenido):
@@ -586,23 +614,18 @@ class ChatUI:
 
 
     def _actualizar_burbuja_agente(self, nuevo_texto):
-        """Actualiza el texto de la última burbuja del agente en el chat actual. Si no existe, la crea."""
-        # Solo actualiza si la conversación no cambió
+        """Actualiza el texto de la última burbuja del agente en el chat actual. Si no existe, la crea. Evita duplicados."""
         if self.conversacion_id is None:
             return
-        burbuja_actualizada = False
-        for frame in reversed(self.scrollable_frame.winfo_children()):
+        # Buscar la última burbuja del agente
+        frames = [frame for frame in reversed(self.scrollable_frame.winfo_children())]
+        for frame in frames:
             for widget in frame.winfo_children():
-                # Actualiza tanto tk.Label (versión anterior) como tk.Message (versión nueva)
-                if isinstance(widget, (tk.Label, tk.Message)) and widget.cget('bg') == AGENT_BUBBLE:
+                if isinstance(widget, tk.Message) and widget.cget('bg') == AGENT_BUBBLE:
                     widget.config(text=nuevo_texto)
-                    burbuja_actualizada = True
-                    break
-            if burbuja_actualizada:
-                break
-        # Si no existe la burbuja (por cambio de chat), la crea al final
-        if not burbuja_actualizada:
-            self._insertar_burbuja('Agente', nuevo_texto)
+                    return
+        # Si no existe, la crea
+        self._insertar_burbuja('Agente', nuevo_texto)
 
     def _guardar_mensaje(self, remitente, contenido):
         with self.agente.lock:
@@ -918,8 +941,10 @@ class ChatUI:
             # Limpiar status breve
             self.root.after(500, lambda: self.status_var.set(''))
         # Diferir cargas iniciales para no bloquear el render inicial
+        # Sólo cargamos la lista de proyectos; NO auto-cargamos conversaciones libres.
         self.root.after(0, self._cargar_proyectos)
-        self.root.after(0, self._cargar_historial_global)
+        # Asegurar que el panel de chat quede vacío al inicio (sin proyecto seleccionado)
+        self.root.after(0, self._cargar_historial)
         # Enfocar entrada de texto al iniciar
         self.root.after(1000, self._enfocar_input)
         # Bind global para mousewheel (scroll en canvas)
