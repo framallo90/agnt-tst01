@@ -37,9 +37,66 @@ class ChatUI:
     """
     UI del agente personal: proyectos -> chats -> mensajes
     """
+    # --- Toast/burbuja de error ---
+    def _show_toast_error(self, msg, duration=3500):
+        # Crea una burbuja flotante en la esquina inferior derecha de la ventana principal
+        if hasattr(self, '_toast_error') and self._toast_error:
+            self._toast_error.destroy()
+        self._toast_error = tk.Label(
+            self.root,
+            text=msg,
+            bg='#b83a3a',
+            fg='white',
+            font=('Segoe UI', 10, 'bold'),
+            padx=16,
+            pady=8,
+            bd=2,
+            relief='ridge'
+        )
+        self._toast_error.update_idletasks()
+        w = self._toast_error.winfo_reqwidth()
+        h = self._toast_error.winfo_reqheight()
+        rw = self.root.winfo_width()
+        rh = self.root.winfo_height()
+        # Si la ventana aún no está visible, usa geometry
+        if rw < 10 or rh < 10:
+            rw = 720
+            rh = 940
+        x = rw - w - 24
+        y = rh - h - 24
+        self._toast_error.place(x=x, y=y)
+        self.root.after(duration, lambda: self._toast_error.destroy())
+    # --- Toast/burbuja de tip ---
+    def _show_toast_tip(self, msg, duration=2500):
+        if hasattr(self, '_toast_tip') and self._toast_tip:
+            self._toast_tip.destroy()
+        self._toast_tip = tk.Label(
+            self.root,
+            text=msg,
+            bg='#2c313c',
+            fg='#e6e6e6',
+            font=('Segoe UI', 10, 'italic'),
+            padx=16,
+            pady=8,
+            bd=2,
+            relief='ridge'
+        )
+        self._toast_tip.update_idletasks()
+        w = self._toast_tip.winfo_reqwidth()
+        h = self._toast_tip.winfo_reqheight()
+        rw = self.root.winfo_width()
+        rh = self.root.winfo_height()
+        if rw < 10 or rh < 10:
+            rw = 720
+            rh = 940
+        x = rw - w - 24
+        y = rh - h - 24
+        self._toast_tip.place(x=x, y=y)
+        self.root.after(duration, lambda: self._toast_tip.destroy())
     def __init__(self, root):
         self.root = root
         self.root.title("Agente Personal")
+        self.root.geometry("720x940")
 
         # Estado
         self.agente = None  # Se inicializa en run() para evitar bloquear el render inicial
@@ -250,47 +307,35 @@ class ChatUI:
     # ---------------- Menús contextuales ----------------
     def _mostrar_menu_proyecto(self, event):
         has_selection = False
-        try:
-            count = self.listbox_proyectos.size()
-            if count > 0:
-                idx = self.listbox_proyectos.nearest(event.y)
-                # Validar si el click cayó dentro del bbox del item
-                bbox = self.listbox_proyectos.bbox(idx)
-                if bbox:
-                    y0, h = bbox[1], bbox[3]
-                    if y0 <= event.y <= y0 + h:
-                        self.listbox_proyectos.selection_clear(0, 'end')
-                        self.listbox_proyectos.selection_set(idx)
-                        has_selection = True
-                        # Actualizar estado interno manualmente
-                        try:
-                            self.seleccionar_proyecto()
-                        except Exception:
-                            pass
-                if not has_selection:
-                    # Click fuera de items: limpiar selección
+        count = self.listbox_proyectos.size()
+        if count > 0:
+            idx = self.listbox_proyectos.nearest(event.y)
+            bbox = self.listbox_proyectos.bbox(idx)
+            if bbox:
+                y0, h = bbox[1], bbox[3]
+                if y0 <= event.y <= y0 + h:
                     self.listbox_proyectos.selection_clear(0, 'end')
-            else:
-                self.listbox_proyectos.selection_clear(0, 'end')
-        except Exception:
+                    self.listbox_proyectos.selection_set(idx)
+                    has_selection = True
+                    try:
+                        self.seleccionar_proyecto()
+                    except Exception:
+                        pass
+        if not has_selection:
             self.listbox_proyectos.selection_clear(0, 'end')
 
         # Habilitar/Deshabilitar opciones según selección
+        state = 'normal' if has_selection else 'disabled'
         try:
-            state = 'normal' if has_selection else 'disabled'
-            # 0: Renombrar Proyecto, 1: Eliminar Proyecto
             self.menu_proyecto.entryconfig(0, state=state)
             self.menu_proyecto.entryconfig(1, state=state)
-            # 'Nuevo Proyecto' siempre habilitado
         except Exception:
             pass
-        # Elegir menú según haya selección o no
         menu = self.menu_proyecto if has_selection else self.menu_proyecto_vacio
-        # Pista en status
         if has_selection:
-            self._set_status('Tip: botón derecho para renombrar o eliminar el proyecto seleccionado.')
+            self._show_toast_tip('Tip: botón derecho para renombrar o eliminar el proyecto seleccionado.')
         else:
-            self._set_status('Tip: no hay proyecto seleccionado. Podés crear uno nuevo desde el menú.')
+            self._show_toast_tip('Tip: no hay proyecto seleccionado. Podés crear uno nuevo desde el menú.')
         menu.tk_popup(event.x_root, event.y_root)
 
     def _mostrar_menu_chat(self, event):
@@ -331,26 +376,22 @@ class ChatUI:
         # Elegir menú según haya selección y proyecto actual
         if self.proyecto_id is None:
             # No mostrar ningún menú si no hay proyecto seleccionado
-            self._set_status('Seleccioná un proyecto para poder crear conversaciones.')
+            self._show_toast_tip('Seleccioná un proyecto para poder crear conversaciones.')
             return
         if has_selection:
             menu = self.menu_chat
-            self._set_status('Tip: podés renombrar o eliminar la conversación seleccionada.')
+            self._show_toast_tip('Tip: podés renombrar o eliminar la conversación seleccionada.')
             menu.tk_popup(event.x_root, event.y_root)
         else:
             # Solo mostrar menú vacío si no hay chats, y evitar duplicados
             if self.listbox_chats.size() == 0:
                 menu = self.menu_chat_vacio_proy
-                self._set_status('Tip: no hay conversación seleccionada. Creá una nueva desde el menú.')
+                self._show_toast_tip('Tip: no hay conversación seleccionada. Creá una nueva desde el menú.')
                 menu.tk_popup(event.x_root, event.y_root)
 
     def _set_status(self, msg: str, timeout: int = 3000):
-        try:
-            self.status_var.set(msg)
-            if timeout:
-                self.root.after(timeout, lambda: self.status_var.set(''))
-        except Exception:
-            pass
+        # Desactivado: los errores y pistas se muestran solo como toast
+        pass
 
     def _on_mousewheel(self, event):
         if hasattr(event, 'delta') and event.delta:  # Windows
@@ -373,7 +414,7 @@ class ChatUI:
                 self.agente.conn.commit()
             self._cargar_proyectos(seleccionar_nombre=nombre)
         except sqlite3.IntegrityError:
-            messagebox.showerror('Error', f'Ya existe un proyecto llamado "{nombre}".')
+                self._show_toast_error(f'Ya existe un proyecto llamado "{nombre}".')
 
     def renombrar_proyecto(self):
         if self.proyecto_id is None:
@@ -388,7 +429,7 @@ class ChatUI:
                 self.agente.conn.commit()
             self._cargar_proyectos(seleccionar_nombre=nuevo)
         except sqlite3.IntegrityError:
-            messagebox.showerror('Error', f'Ya existe un proyecto llamado "{nuevo}".')
+            self._show_toast_error(f'Ya existe un proyecto llamado "{nuevo}".')
 
     def eliminar_proyecto(self):
         sel = self.listbox_proyectos.curselection()
@@ -400,7 +441,7 @@ class ChatUI:
             cur.execute('SELECT id FROM proyectos WHERE nombre=?', (nombre,))
             row = cur.fetchone()
         if not row:
-            self._safe(messagebox.showerror, 'Error', 'Proyecto no encontrado en la base de datos.')
+            self._show_toast_error('Proyecto no encontrado en la base de datos.')
             self._cargar_proyectos()
             return
         proyecto_id = row[0]
@@ -420,7 +461,7 @@ class ChatUI:
                 cur2.execute('DELETE FROM proyectos WHERE id=?', (proyecto_id,))
                 self.agente.conn.commit()
         except Exception as e:
-            self._safe(messagebox.showerror, 'Error', f'No se pudo eliminar el proyecto: {e}')
+            self._show_toast_error(f'No se pudo eliminar el proyecto: {e}')
             return
         self.proyecto_actual = None
         self.proyecto_id = None
@@ -513,10 +554,9 @@ class ChatUI:
     def eliminar_chat(self):
         sel = self.listbox_chats.curselection()
         if not sel:
+            self._show_toast_tip('Tip: selecciona una conversación para renombrar o eliminar.')
             return
         idx = sel[0]
-        if idx < 0 or idx >= len(self._chat_map):
-            return
         conv_id = self._chat_map[idx]
         nombre = self.listbox_chats.get(idx)
         if not self._safe(messagebox.askyesno, 'Confirmar', f'¿Eliminar la conversación "{nombre}" y su historial?'):
@@ -533,7 +573,7 @@ class ChatUI:
                 cur2.execute('DELETE FROM conversaciones WHERE id=?', (conv_id,))
                 self.agente.conn.commit()
         except Exception as e:
-            self._safe(messagebox.showerror, 'Error', f'No se pudo eliminar la conversación: {e}')
+            self._show_toast_error(f'No se pudo eliminar la conversación: {e}')
             return
         self.conversacion_id = None
         self.root.update_idletasks()
@@ -718,10 +758,18 @@ class ChatUI:
     def _respuesta_nostream(self, texto_usuario: str, conversacion_id: int, cancel_event: threading.Event):
         try:
             historial = self._armar_historial(conversacion_id, texto_usuario)
-            respuesta_final = obtener_respuesta_llama(historial)
+            # Si el modelo soporta callback de cancelación, pásalo aquí
+            if hasattr(obtener_respuesta_llama, '__call__') and 'cancel_callback' in obtener_respuesta_llama.__code__.co_varnames:
+                def cancel_callback():
+                    return cancel_event.is_set()
+                respuesta_final = obtener_respuesta_llama(historial, cancel_callback=cancel_callback)
+            else:
+                respuesta_final = obtener_respuesta_llama(historial)
         except Exception as e:
             respuesta_final = f"[Error del modelo] {e}"
         if cancel_event.is_set():
+            self.animando = False
+            self.root.after(0, self._actualizar_burbuja_agente, '[Cancelado]')
             return  # conversación eliminada o cancelada
         self.animando = False
         self.root.after(0, self._actualizar_burbuja_agente, respuesta_final)
@@ -779,7 +827,7 @@ class ChatUI:
         try:
             import speech_recognition as sr
         except ImportError:
-            self._safe(messagebox.showerror, 'Falta dependencia', 'Necesitás instalar SpeechRecognition para transcribir voz.')
+            self._show_toast_error('Necesitás instalar SpeechRecognition para transcribir voz.')
             self._set_status('Falta SpeechRecognition. Instalá: pip install SpeechRecognition', timeout=6000)
             return
 
@@ -808,12 +856,12 @@ class ChatUI:
                     texto = ''
                     self._set_status('No se entendió el audio. Intentá de nuevo.', timeout=4000)
                 except Exception as e:
-                    self._safe(messagebox.showerror, 'Transcripción', f'Error: {e}')
+                    self._show_toast_error(f'Transcripción: Error: {e}')
                     texto = ''
                 if texto:
                     self.root.after(0, lambda: self._insertar_y_enviar(texto))
             except Exception as e:
-                self._safe(messagebox.showerror, 'Dictado de voz', str(e))
+                self._show_toast_error(f'Dictado de voz: {e}')
             finally:
                 self._grab_thread = None
                 self._grab_frames = []
@@ -824,7 +872,7 @@ class ChatUI:
             import sounddevice as sd
             import numpy as np
         except Exception as e:
-            self._safe(messagebox.showerror, 'Audio', f'No se pudo inicializar sounddevice: {e}\nAsegúrate de que sounddevice esté instalado y el micrófono esté disponible.')
+            self._show_toast_error(f'Audio: No se pudo inicializar sounddevice: {e}\nAsegúrate de que sounddevice esté instalado y el micrófono esté disponible.')
             self._set_status('Error de audio: revisa la configuración del micrófono.', timeout=6000)
             return
 
@@ -847,7 +895,7 @@ class ChatUI:
                     while self._grab_stop and not self._grab_stop.is_set():
                         sd.sleep(100)
             except Exception as e:
-                self._safe(messagebox.showerror, 'Audio', f'Error de entrada de audio: {e}')
+                self._show_toast_error(f'Audio: Error de entrada de audio: {e}')
             finally:
                 self._stop_recording_ui()
 
