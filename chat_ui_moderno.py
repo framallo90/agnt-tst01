@@ -101,9 +101,18 @@ class ChatUI:
         self.frame_chat = tk.Frame(self.frame_main, bg=DARK_BG)
         self.frame_chat.pack(side='right', fill='both', expand=True)
         self.frame_chat.pack_propagate(True)
-        # Chat area: canvas and scrollbar directly in frame_chat (layout original)
-        self.canvas = tk.Canvas(self.frame_chat, bg=DARK_BG, highlightthickness=0)
-        self.scrollbar = ttk.Scrollbar(self.frame_chat, orient='vertical', command=self.canvas.yview)
+        # Nuevo recuadro visual para el área de chat
+        self.frame_chat_area = tk.Frame(
+            self.frame_chat,
+            bg=DARK_BG,
+            highlightbackground=DARK_ACCENT,
+            highlightthickness=1,
+            bd=1,
+            relief='ridge'
+        )
+        self.frame_chat_area.pack(side='top', fill='both', expand=True, padx=8, pady=(8, 0))
+        self.canvas = tk.Canvas(self.frame_chat_area, bg=DARK_BG, highlightthickness=0)
+        self.scrollbar = ttk.Scrollbar(self.frame_chat_area, orient='vertical', command=self.canvas.yview)
         self.scrollable_frame = tk.Frame(self.canvas, bg=DARK_BG)
         self.scrollable_frame.bind(
             '<Configure>',
