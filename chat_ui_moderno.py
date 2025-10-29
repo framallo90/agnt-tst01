@@ -50,6 +50,12 @@ class ChatUI:
         self._cancelaciones = {}
         # Mapa de chats visibles: índice -> conversacion_id
         self._chat_map = []
+        # Grabación de voz (toggle)
+        self._grabando = False
+        self._grab_stop = None  # type: ignore[assignment]
+        self._grab_thread = None  # type: ignore[assignment]
+        self._grab_frames = None  # type: ignore
+        self._grab_fs = 16000
 
         self._init_style()
         self._build_ui()
@@ -75,7 +81,7 @@ class ChatUI:
         hdr.pack(fill='x', pady=(16, 8))
         tk.Label(hdr, text='Proyectos', bg=DARK_PANEL, fg=TEXT_COLOR,
                  font=('Segoe UI', 13, 'bold')).pack(side='left', padx=(12, 8))
-    # Botón '+' removido; alta de proyectos desde menú contextual
+        # Botón '+' removido; alta de proyectos desde menú contextual
 
         # Listbox Proyectos
         self.listbox_proyectos = tk.Listbox(
@@ -776,88 +782,107 @@ class ChatUI:
 
     # ---------------- Utilidades varias ----------------
     def dictar_mensaje(self):
-        """Captura voz y transcribe usando speech_recognition (Google)."""
+        """Toggle grabación: click para empezar, click para detener y transcribir + enviar."""
         try:
             import speech_recognition as sr
         except ImportError:
-            self._set_status('Falta SpeechRecognition. Instalá: pip install SpeechRecognition pyaudio', timeout=6000)
-            msg = (
-                'Para usar dictado de voz:\n'
-                '- pip install SpeechRecognition\n'
-                '- En Windows, también PyAudio (pip install pipwin && pipwin install pyaudio)'
-            )
-            messagebox.showerror('Falta dependencia', msg)
+            self._set_status('Falta SpeechRecognition. Instalá: pip install SpeechRecognition', timeout=6000)
+            messagebox.showerror('Falta dependencia', 'Necesitás instalar SpeechRecognition para transcribir voz.')
             return
 
-        def grabar():
-            r = sr.Recognizer()
+        # Si ya estamos grabando: detener y procesar
+        if self._grabando:
+            if self._grab_stop:
+                self._grab_stop.set()
+            th = self._grab_thread
             try:
-                # Primer intento: Microphone (requiere PyAudio)
-                try:
-                    src = sr.Microphone()
-                    use_pyaudio = True
-                except Exception:
-                    src = None
-                    use_pyaudio = False
-
-                try:
-                    self.btn_microfono.config(state='disabled')
-                except Exception:
-                    pass
-                self.entry_msg.delete(0, tk.END)
-                self.entry_msg.insert(0, 'Escuchando…')
-                self._set_status('Grabando… hablá cerca del micrófono (hasta 8s).', timeout=8000)
-
-                if use_pyaudio and src is not None:
-                    with src as source:
-                        audio = r.listen(source, timeout=5, phrase_time_limit=8)
-                else:
-                    # Fallback: sounddevice (sin PyAudio)
-                    try:
-                        import sounddevice as sd
-                        import numpy as np
-                    except Exception as e:
-                        raise RuntimeError('No hay PyAudio ni sounddevice disponible para capturar audio.') from e
-                    fs = 16000
-                    seconds = 8
-                    try:
-                        self._set_status('Grabando (fallback)…', timeout=seconds * 1000)
-                        data = sd.rec(int(seconds * fs), samplerate=fs, channels=1, dtype='int16')
-                        sd.wait()
-                        raw = data.tobytes()
-                        audio = sr.AudioData(raw, fs, sample_width=2)
-                    except Exception as e:
-                        raise RuntimeError(f'Error de captura (fallback): {e}')
-
-                # Reconocer
+                if th:
+                    th.join(timeout=2.0)
+            except Exception:
+                pass
+            self._grabando = False
+            try:
+                self.btn_microfono.config(text='🎙')
+            except Exception:
+                pass
+            # Procesar frames capturados
+            try:
+                import numpy as np
+                frames = self._grab_frames or []
+                if not frames:
+                    self._set_status('No se capturó audio.', timeout=3000)
+                    return
+                data = np.concatenate(frames, axis=0).astype('int16')
+                raw = data.tobytes()
+                audio = sr.AudioData(raw, self._grab_fs, sample_width=2)
                 self._set_status('Procesando…', timeout=3000)
+                r = sr.Recognizer()
                 try:
                     texto = r.recognize_google(audio, language='es-AR')
                 except sr.UnknownValueError:
                     texto = ''
                     self._set_status('No se entendió el audio. Intentá de nuevo.', timeout=4000)
                 except Exception as e:
-                    raise RuntimeError(f'Error de transcripción: {e}')
-
-                # Insertar transcripción y enviar automáticamente en el hilo de UI
-                try:
+                    messagebox.showerror('Transcripción', f'Error: {e}')
+                    texto = ''
+                if texto:
                     self.root.after(0, lambda: self._insertar_y_enviar(texto))
-                except Exception:
-                    pass
-
-            except sr.WaitTimeoutError:
-                self.entry_msg.delete(0, tk.END)
-                self._set_status('No se detectó voz. Intentá de nuevo.', timeout=4000)
-            except Exception as err:
-                self.entry_msg.delete(0, tk.END)
-                messagebox.showerror('Dictado de voz', str(err))
+            except Exception as e:
+                messagebox.showerror('Dictado de voz', str(e))
             finally:
-                try:
-                    self.btn_microfono.config(state='normal')
-                except Exception:
+                self._grab_thread = None
+                self._grab_frames = []
+                self._grab_stop = None
+            return
+
+        # Iniciar grabación con sounddevice como backend principal
+        try:
+            import sounddevice as sd
+            import numpy as np
+        except Exception as e:
+            # Fallback a una captura breve con Microphone (sin toggle completo)
+            try:
+                r = sr.Recognizer()
+                with sr.Microphone() as source:
+                    self._set_status('Grabando (fallback 5s)…', timeout=5000)
+                    audio = r.listen(source, timeout=5, phrase_time_limit=5)
+                    self._set_status('Procesando…', timeout=3000)
+                    texto = r.recognize_google(audio, language='es-AR')
+                    self.root.after(0, lambda: self._insertar_y_enviar(texto))
+                return
+            except Exception as e2:
+                messagebox.showerror('Dictado de voz', f'No se pudo capturar audio: {e2}')
+                return
+
+        self._grab_stop = threading.Event()
+        self._grab_frames = []
+
+        def cb(indata, frames, time_, status):  # sounddevice callback
+            try:
+                if status:
+                    # podemos loguear status si hace falta
                     pass
-        # Lanzar el hilo de captura
-        threading.Thread(target=grabar, daemon=True).start()
+                # Copia para evitar referencias a buffer mutable
+                self._grab_frames.append(indata.copy())
+            except Exception:
+                pass
+
+        def loop():
+            try:
+                with sd.InputStream(samplerate=self._grab_fs, channels=1, dtype='int16', callback=cb):
+                    self._set_status('Grabando… click de nuevo para detener.', timeout=0)
+                    while self._grab_stop and not self._grab_stop.is_set():
+                        sd.sleep(100)
+            except Exception as e:
+                messagebox.showerror('Audio', f'Error de entrada de audio: {e}')
+
+        self._grab_thread = threading.Thread(target=loop, daemon=True)
+        self._grab_thread.start()
+        self._grabando = True
+        try:
+            self.btn_microfono.config(text='⏹')
+        except Exception:
+            pass
 
     def _insertar_y_enviar(self, texto: str):
         """Inserta el texto transcrito en el cuadro y dispara el envío para que el modelo responda."""
