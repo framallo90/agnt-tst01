@@ -39,6 +39,10 @@ class ChatUI:
         self.respuesta_queue = queue.Queue()
         self.animando = False
         self._recibiendo_stream = False
+        # Config: activar/desactivar stream. Por defecto, no-stream para máxima estabilidad.
+        self.stream_enabled = False
+        # Cancelación de respuestas en curso por conversación
+        self._cancelaciones = {}
 
         self._build_ui()
         self._cargar_proyectos()
@@ -168,16 +172,18 @@ class ChatUI:
         self.frame_input.pack(side='bottom', fill='x')
         self.entry_msg = tk.Entry(self.frame_input, font=FONT, bg=DARK_ACCENT, fg=TEXT_COLOR,
                                   insertbackground=TEXT_COLOR, relief='flat')
-        self.entry_msg.pack(side='left', padx=(20, 5), pady=12, fill='x', expand=True)
-        self.entry_msg.bind('<Return>', self.enviar_mensaje)
-        self.btn_microfono = tk.Button(self.frame_input, text='🎤', font=('Segoe UI Emoji', 12),
-                                       bg=DARK_ACCENT, fg=TEXT_COLOR, relief='flat',
-                                       command=self.dictar_mensaje)
-        self.btn_microfono.pack(side='left', padx=5)
+        # Para que los botones a la derecha no se escondan al achicar, los anclamos a la derecha
         self.btn_enviar = tk.Button(self.frame_input, text='Enviar', bg=USER_BUBBLE, fg='white',
                                     font=FONT, relief='flat', activebackground=USER_BUBBLE,
                                     command=self.enviar_mensaje)
-        self.btn_enviar.pack(side='left', padx=(5, 20))
+        self.btn_microfono = tk.Button(self.frame_input, text='🎤', font=('Segoe UI Emoji', 12),
+                                       bg=DARK_ACCENT, fg=TEXT_COLOR, relief='flat',
+                                       command=self.dictar_mensaje)
+        # Empaquetar primero los botones a la derecha, luego la entrada expandible a la izquierda
+        self.btn_enviar.pack(side='right', padx=(5, 20), pady=12)
+        self.btn_microfono.pack(side='right', padx=5, pady=12)
+        self.entry_msg.pack(side='left', padx=(20, 5), pady=12, fill='x', expand=True)
+        self.entry_msg.bind('<Return>', self.enviar_mensaje)
 
     # ---------------- Menús contextuales ----------------
     def _mostrar_menu_proyecto(self, event):
@@ -251,17 +257,16 @@ class ChatUI:
             messagebox.showerror('Error', f'Ya existe un proyecto llamado "{nuevo}".')
 
     def eliminar_proyecto(self):
-        # Robust project deletion: confirm, compute current project id from selection/name,
-        # delete associated messages/conversations and project, refresh UI and notify.
+        # Eliminación con transacción y confianza en ON DELETE CASCADE
         sel = self.listbox_proyectos.curselection()
         if not sel:
             # nothing selected
             return
         nombre = self.listbox_proyectos.get(sel[0])
-        # get project id to be sure
-        cur = self.agente.conn.cursor()
-        cur.execute('SELECT id FROM proyectos WHERE nombre=?', (nombre,))
-        row = cur.fetchone()
+        with self.agente.lock:
+            cur = self.agente.conn.cursor()
+            cur.execute('SELECT id FROM proyectos WHERE nombre=?', (nombre,))
+            row = cur.fetchone()
         if not row:
             messagebox.showerror('Error', 'Proyecto no encontrado en la base de datos.')
             self._cargar_proyectos()
@@ -270,14 +275,15 @@ class ChatUI:
         if not messagebox.askyesno('Confirmar', f'¿Eliminar el proyecto "{nombre}" y todas sus conversaciones y mensajes?'):
             return
         try:
-            # Use DB lock to prevent concurrent writes from background threads
             with self.agente.lock:
-                # Delete messages -> conversations -> project. FK cascade should handle it, but do explicit cleanup
-                cur.execute('SELECT id FROM conversaciones WHERE proyecto_id=?', (proyecto_id,))
-                convs = cur.fetchall()
-                for (conv_id,) in convs:
-                    cur.execute('DELETE FROM mensajes WHERE conversacion_id=?', (conv_id,))
-                cur.execute('DELETE FROM conversaciones WHERE proyecto_id=?', (proyecto_id,))
+                # Cancelar respuestas en curso de todas las conversaciones del proyecto
+                convs = cur.execute('SELECT id FROM conversaciones WHERE proyecto_id=?', (proyecto_id,)).fetchall()
+                for (cid,) in convs:
+                    ev = self._cancelaciones.get(cid)
+                    if ev:
+                        ev.set()
+                cur.execute('BEGIN IMMEDIATE')
+                # Borrar sólo el proyecto; la cascada se encarga del resto
                 cur.execute('DELETE FROM proyectos WHERE id=?', (proyecto_id,))
                 self.agente.conn.commit()
         except Exception as e:
@@ -304,7 +310,10 @@ class ChatUI:
     def seleccionar_proyecto(self, event=None):
         sel = self.listbox_proyectos.curselection()
         if not sel:
-            self._nueva_conversacion_libre()
+            # No crear ni borrar conversaciones al deseleccionar proyecto.
+            # Solo ocultar acciones de proyecto y dejar el chat actual como está.
+            self.proyecto_actual = None
+            self.proyecto_id = None
             self.btn_renombrar.pack_forget()
             self.btn_eliminar.pack_forget()
             self.btn_renombrar_chat.pack_forget()
@@ -339,7 +348,12 @@ class ChatUI:
             self.listbox_proyectos.selection_set(idx)
             self.seleccionar_proyecto()
         else:
-            self._nueva_conversacion_libre()
+            # Sin proyectos: no crear conversaciones libres automáticamente.
+            self.proyecto_actual = None
+            self.proyecto_id = None
+            self.listbox_chats.delete(0, tk.END)
+            self.conversacion_id = None
+            self._cargar_historial()
 
     # ---------------- Chats ----------------
     def crear_chat(self):
@@ -367,15 +381,15 @@ class ChatUI:
         self._cargar_chats(self.proyecto_id, seleccionar_nombre=nuevo)
 
     def eliminar_chat(self):
-        # Robust chat deletion: determine selected chat by name+project, confirm, delete and refresh
+        # Eliminación simple con cascada de mensajes
         sel = self.listbox_chats.curselection()
         if not sel:
             return
         nombre = self.listbox_chats.get(sel[0])
-        # get conversacion id from DB to be safe
-        cur = self.agente.conn.cursor()
-        cur.execute('SELECT id FROM conversaciones WHERE nombre=? AND proyecto_id=?', (nombre, self.proyecto_id))
-        row = cur.fetchone()
+        with self.agente.lock:
+            cur = self.agente.conn.cursor()
+            cur.execute('SELECT id FROM conversaciones WHERE nombre=? AND proyecto_id=?', (nombre, self.proyecto_id))
+            row = cur.fetchone()
         if not row:
             messagebox.showerror('Error', 'Conversación no encontrada en la base de datos.')
             self._cargar_chats(self.proyecto_id)
@@ -385,7 +399,11 @@ class ChatUI:
             return
         try:
             with self.agente.lock:
-                cur.execute('DELETE FROM mensajes WHERE conversacion_id=?', (conv_id,))
+                # Cancelar respuesta en curso asociada a esta conversación
+                ev = self._cancelaciones.get(conv_id)
+                if ev:
+                    ev.set()
+                cur.execute('BEGIN IMMEDIATE')
                 cur.execute('DELETE FROM conversaciones WHERE id=?', (conv_id,))
                 self.agente.conn.commit()
         except Exception as e:
@@ -440,19 +458,11 @@ class ChatUI:
             self.listbox_chats.selection_set(idx)
             self.seleccionar_chat()
         else:
-            self._nueva_conversacion_libre()
+            # No crear chats automáticamente; quedar en estado sin conversación
+            self.conversacion_id = None
+            self._cargar_historial()
 
-    # ---------------- Conversación libre ----------------
-    def _nueva_conversacion_libre(self):
-        with self.agente.lock:
-            cur = self.agente.conn.cursor()
-            cur.execute('INSERT INTO conversaciones (nombre, proyecto_id) VALUES (?, ?)',
-                        ("Conversación Libre", None))
-            self.agente.conn.commit()
-        self.conversacion_id = cur.lastrowid
-        self.proyecto_actual = None
-        self.proyecto_id = None
-        self._cargar_historial()
+    # (Eliminado método de conversación libre no utilizado)
 
     # ---------------- Mensajería ----------------
     def _cargar_historial(self):
@@ -488,6 +498,17 @@ class ChatUI:
 
     def _guardar_mensaje(self, remitente, contenido):
         with self.agente.lock:
+            # Si no hay conversación seleccionada, crear una acorde al contexto actual
+            if self.conversacion_id is None:
+                cur = self.agente.conn.cursor()
+                if self.proyecto_id is not None:
+                    cur.execute('INSERT INTO conversaciones (nombre, proyecto_id) VALUES (?, ?)',
+                                ("Conversación", self.proyecto_id))
+                else:
+                    cur.execute('INSERT INTO conversaciones (nombre, proyecto_id) VALUES (?, ?)',
+                                ("Conversación Libre", None))
+                self.agente.conn.commit()
+                self.conversacion_id = cur.lastrowid
             cur = self.agente.conn.cursor()
             cur.execute('INSERT INTO mensajes (conversacion_id, remitente, tipo, contenido) '
                         'VALUES (?, ?, ?, ?)', (self.conversacion_id, remitente, 'texto', contenido))
@@ -495,8 +516,9 @@ class ChatUI:
 
     def enviar_mensaje(self, event=None):
         texto = self.entry_msg.get().strip()
-        if not texto or self.conversacion_id is None:
+        if not texto:
             return
+        # Guardar mensaje del usuario (creará conversación si falta)
         self._guardar_mensaje('Usuario', texto)
         self.entry_msg.delete(0, tk.END)
         self._cargar_historial()
@@ -505,25 +527,60 @@ class ChatUI:
         self._insertar_burbuja('Agente', '...')
         self.animando = True
         self._animar_puntos()
-        threading.Thread(target=self._respuesta_automatica_stream,
-                         args=(texto,), daemon=True).start()
 
-    def _respuesta_automatica_stream(self, texto_usuario: str):
-        # Historial
+        # Snapshot para responder sobre la misma conversación aunque el usuario cambie de selección
+        conv_id_snapshot = self.conversacion_id
+        # Preparar cancelador para esta conversación
+        ev = threading.Event()
+        self._cancelaciones[conv_id_snapshot] = ev
+        if self.stream_enabled:
+            threading.Thread(target=self._respuesta_streaming,
+                             args=(texto, conv_id_snapshot, ev), daemon=True).start()
+        else:
+            threading.Thread(target=self._respuesta_nostream,
+                             args=(texto, conv_id_snapshot, ev), daemon=True).start()
+
+    def _armar_historial(self, conversacion_id: int, texto_usuario: str):
         with self.agente.lock:
             cur = self.agente.conn.cursor()
             cur.execute('SELECT remitente, contenido FROM mensajes WHERE conversacion_id = ? '
-                        'ORDER BY datetime(fecha) ASC, id ASC', (self.conversacion_id,))
+                        'ORDER BY datetime(fecha) ASC, id ASC', (conversacion_id,))
             rows = cur.fetchall()
-
         historial = [{'role': 'user' if r == 'Usuario' else 'assistant', 'content': c}
                      for r, c in rows]
         if not historial or historial[-1]['role'] != 'user':
             historial.append({'role': 'user', 'content': texto_usuario})
+        return historial
 
-        # Stream
+    def _respuesta_nostream(self, texto_usuario: str, conversacion_id: int, cancel_event: threading.Event):
+        try:
+            historial = self._armar_historial(conversacion_id, texto_usuario)
+            respuesta_final = obtener_respuesta_llama(historial)
+        except Exception as e:
+            respuesta_final = f"[Error del modelo] {e}"
+        if cancel_event.is_set():
+            return  # conversación eliminada o cancelada
+        self.animando = False
+        self.root.after(0, self._actualizar_burbuja_agente, respuesta_final)
+        try:
+            with self.agente.lock:
+                if cancel_event.is_set():
+                    return
+                cur = self.agente.conn.cursor()
+                cur.execute('INSERT INTO mensajes (conversacion_id, remitente, tipo, contenido) '
+                            'VALUES (?, "Agente", "texto", ?)', (conversacion_id, respuesta_final))
+                self.agente.conn.commit()
+        except Exception:
+            return
+        self.respuesta_queue.put(True)
+
+    def _respuesta_streaming(self, texto_usuario: str, conversacion_id: int, cancel_event: threading.Event):
+        historial = self._armar_historial(conversacion_id, texto_usuario)
         self._recibiendo_stream = False
+
         def actualizar_burbuja(parcial: str):
+            if cancel_event.is_set():
+                return
             if not self._recibiendo_stream:
                 self.animando = False
                 self._recibiendo_stream = True
@@ -532,23 +589,23 @@ class ChatUI:
         try:
             respuesta_final = obtener_respuesta_llama_stream(historial, actualizar_burbuja)
         except Exception as e:
-            # Fallback: si el stream falla, generamos respuesta no-stream para no dejar colgado al usuario
             try:
                 respuesta_final = obtener_respuesta_llama(historial)
             except Exception:
                 respuesta_final = f"[Error del modelo] {e}"
-            # Asegurar que la burbuja muestre el final aunque el stream haya fallado
             self.root.after(0, self._actualizar_burbuja_agente, respuesta_final)
 
-        # Guardar final (protegiendo con lock contra borrados concurrentes)
+        if cancel_event.is_set():
+            return
         try:
             with self.agente.lock:
+                if cancel_event.is_set():
+                    return
+                cur = self.agente.conn.cursor()
                 cur.execute('INSERT INTO mensajes (conversacion_id, remitente, tipo, contenido) '
-                            'VALUES (?, "Agente", "texto", ?)', (self.conversacion_id, respuesta_final))
+                            'VALUES (?, "Agente", "texto", ?)', (conversacion_id, respuesta_final))
                 self.agente.conn.commit()
         except Exception:
-            # Si falla el guardado por FK (p. ej. la conversación fue borrada), no queremos
-            # que el hilo mate la aplicación; simplemente descartamos la respuesta.
             return
         self.respuesta_queue.put(True)
 
