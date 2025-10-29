@@ -43,6 +43,8 @@ class ChatUI:
         self.stream_enabled = False
         # Cancelación de respuestas en curso por conversación
         self._cancelaciones = {}
+        # Mapa de chats visibles: índice -> conversacion_id
+        self._chat_map = []
 
         self._build_ui()
         self._cargar_proyectos()
@@ -82,17 +84,7 @@ class ChatUI:
         self.listbox_proyectos.bind('<<ListboxSelect>>', self.seleccionar_proyecto)
         self.listbox_proyectos.bind('<Button-3>', self._mostrar_menu_proyecto)
 
-        # Acciones Proyecto
-        self.btn_renombrar = tk.Button(
-            self.frame_menu, text='✏️ Renombrar Proyecto', bg=DARK_ACCENT, fg=TEXT_COLOR,
-            font=FONT, relief='flat', command=self.renombrar_proyecto, activebackground=USER_BUBBLE
-        )
-        self.btn_eliminar = tk.Button(
-            self.frame_menu, text='🗑 Eliminar Proyecto', bg='#b83a3a', fg='white',
-            font=FONT, relief='flat', command=self.eliminar_proyecto, activebackground='#7a2323'
-        )
-        self.btn_renombrar.pack_forget()
-        self.btn_eliminar.pack_forget()
+        # (Botones de proyecto removidos; usar menú contextual)
 
         # Panel de chats por proyecto
         self.frame_chats = tk.Frame(self.frame_menu, bg=DARK_PANEL)
@@ -317,8 +309,7 @@ class ChatUI:
             # Solo ocultar acciones de proyecto y dejar el chat actual como está.
             self.proyecto_actual = None
             self.proyecto_id = None
-            self.btn_renombrar.pack_forget()
-            self.btn_eliminar.pack_forget()
+            # (Botones de proyecto removidos)
             self.btn_renombrar_chat.pack_forget()
             self.btn_eliminar_chat.pack_forget()
             self.btn_borrar_hist.pack_forget()
@@ -332,8 +323,7 @@ class ChatUI:
             self.proyecto_id = row[0]
             self.proyecto_actual = nombre
             self._cargar_chats(self.proyecto_id)
-            self.btn_renombrar.pack(pady=(4, 4), padx=12, fill='x')
-            self.btn_eliminar.pack(pady=(0, 8), padx=12, fill='x')
+            # (Botones de proyecto removidos)
 
     def _cargar_proyectos(self, seleccionar_nombre: str | None = None):
         self.listbox_proyectos.delete(0, tk.END)
@@ -388,16 +378,11 @@ class ChatUI:
         sel = self.listbox_chats.curselection()
         if not sel:
             return
-        nombre = self.listbox_chats.get(sel[0])
-        with self.agente.lock:
-            cur = self.agente.conn.cursor()
-            cur.execute('SELECT id FROM conversaciones WHERE nombre=? AND proyecto_id=?', (nombre, self.proyecto_id))
-            row = cur.fetchone()
-        if not row:
-            messagebox.showerror('Error', 'Conversación no encontrada en la base de datos.')
-            self._cargar_chats(self.proyecto_id)
+        idx = sel[0]
+        if idx < 0 or idx >= len(self._chat_map):
             return
-        conv_id = row[0]
+        conv_id = self._chat_map[idx]
+        nombre = self.listbox_chats.get(idx)
         if not messagebox.askyesno('Confirmar', f'¿Eliminar la conversación "{nombre}" y su historial?'):
             return
         try:
@@ -417,8 +402,11 @@ class ChatUI:
 
         # Immediate UI update: remove chat entry from listbox so it's not visible anymore
         try:
-            sel_idx = sel[0]
-            self.listbox_chats.delete(sel_idx)
+            self.listbox_chats.delete(idx)
+            try:
+                del self._chat_map[idx]
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -431,20 +419,18 @@ class ChatUI:
         sel = self.listbox_chats.curselection()
         if not sel:
             return
-        nombre = self.listbox_chats.get(sel[0])
-        cur = self.agente.conn.cursor()
-        cur.execute('SELECT id FROM conversaciones WHERE nombre=? AND proyecto_id=?',
-                    (nombre, self.proyecto_id))
-        row = cur.fetchone()
-        if row:
-            self.conversacion_id = row[0]
-            self._cargar_historial()
-            self.btn_renombrar_chat.pack(pady=(0, 4), fill='x')
-            self.btn_eliminar_chat.pack(pady=(0, 4), fill='x')
-            self.btn_borrar_hist.pack(pady=(0, 6), fill='x')
+        idx = sel[0]
+        if idx < 0 or idx >= len(self._chat_map):
+            return
+        self.conversacion_id = self._chat_map[idx]
+        self._cargar_historial()
+        self.btn_renombrar_chat.pack(pady=(0, 4), fill='x')
+        self.btn_eliminar_chat.pack(pady=(0, 4), fill='x')
+        self.btn_borrar_hist.pack(pady=(0, 6), fill='x')
 
     def _cargar_chats(self, proyecto_id: int, seleccionar_nombre: str | None = None):
         self.listbox_chats.delete(0, tk.END)
+        self._chat_map = []
         cur = self.agente.conn.cursor()
         cur.execute('SELECT nombre, id FROM conversaciones WHERE proyecto_id=? ORDER BY id ASC',
                     (proyecto_id,))
@@ -453,6 +439,7 @@ class ChatUI:
         for nombre, cid in rows:
             n = nombre or f"Chat #{cid}"
             nombres.append(n)
+            self._chat_map.append(cid)
             self.listbox_chats.insert(tk.END, n)
 
         if nombres:
