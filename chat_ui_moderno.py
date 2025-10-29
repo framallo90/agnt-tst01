@@ -190,7 +190,13 @@ class ChatUI:
         self.entry_msg = self._make_entry(self.frame_input)
         # Para que los botones a la derecha no se escondan al achicar, los anclamos a la derecha
         self.btn_enviar = self._make_button(self.frame_input, 'Enviar', command=self.enviar_mensaje, primary=True)
-        self.btn_microfono = self._make_button(self.frame_input, '🎤', command=self.dictar_mensaje)
+        # Mic button style similar to modern assistants
+        self.btn_microfono = self._make_button(self.frame_input, '�', command=self.dictar_mensaje)
+        try:
+            # Slightly narrower to look like an icon button
+            self.btn_microfono.config(width=3)
+        except Exception:
+            pass
         # Empaquetar primero los botones a la derecha, luego la entrada expandible a la izquierda
         self.btn_enviar.pack(side='right', padx=(5, 20), pady=12)
         self.btn_microfono.pack(side='right', padx=5, pady=12)
@@ -770,29 +776,86 @@ class ChatUI:
 
     # ---------------- Utilidades varias ----------------
     def dictar_mensaje(self):
+        """Captura voz y transcribe usando speech_recognition (Google)."""
         try:
             import speech_recognition as sr
         except ImportError:
-            messagebox.showerror('Error',
-                                 'Falta instalar speech_recognition.\nEjecutá: pip install SpeechRecognition')
+            self._set_status('Falta SpeechRecognition. Instalá: pip install SpeechRecognition pyaudio', timeout=6000)
+            msg = (
+                'Para usar dictado de voz:\n'
+                '- pip install SpeechRecognition\n'
+                '- En Windows, también PyAudio (pip install pipwin && pipwin install pyaudio)'
+            )
+            messagebox.showerror('Falta dependencia', msg)
             return
 
         def grabar():
             r = sr.Recognizer()
-            with sr.Microphone() as source:
-                self.btn_microfono.config(state='disabled', bg='#27ae60', fg='white')
-                self.entry_msg.delete(0, tk.END)
-                self.entry_msg.insert(0, 'Escuchando...')
+            try:
+                # Primer intento: Microphone (requiere PyAudio)
                 try:
-                    audio = r.listen(source, timeout=5)
+                    src = sr.Microphone()
+                    use_pyaudio = True
+                except Exception:
+                    src = None
+                    use_pyaudio = False
+
+                try:
+                    self.btn_microfono.config(state='disabled')
+                except Exception:
+                    pass
+                self.entry_msg.delete(0, tk.END)
+                self.entry_msg.insert(0, 'Escuchando…')
+                self._set_status('Grabando… hablá cerca del micrófono (hasta 8s).', timeout=8000)
+
+                if use_pyaudio and src is not None:
+                    with src as source:
+                        audio = r.listen(source, timeout=5, phrase_time_limit=8)
+                else:
+                    # Fallback: sounddevice (sin PyAudio)
+                    try:
+                        import sounddevice as sd
+                        import numpy as np
+                    except Exception as e:
+                        raise RuntimeError('No hay PyAudio ni sounddevice disponible para capturar audio.') from e
+                    fs = 16000
+                    seconds = 8
+                    try:
+                        self._set_status('Grabando (fallback)…', timeout=seconds * 1000)
+                        data = sd.rec(int(seconds * fs), samplerate=fs, channels=1, dtype='int16')
+                        sd.wait()
+                        raw = data.tobytes()
+                        audio = sr.AudioData(raw, fs, sample_width=2)
+                    except Exception as e:
+                        raise RuntimeError(f'Error de captura (fallback): {e}')
+
+                # Reconocer
+                self._set_status('Procesando…', timeout=3000)
+                try:
                     texto = r.recognize_google(audio, language='es-AR')
-                    self.entry_msg.delete(0, tk.END)
-                    self.entry_msg.insert(0, texto)
+                except sr.UnknownValueError:
+                    texto = ''
+                    self._set_status('No se entendió el audio. Intentá de nuevo.', timeout=4000)
                 except Exception as e:
-                    self.entry_msg.delete(0, tk.END)
-                    messagebox.showerror('Error', f'No se pudo transcribir: {e}')
-                finally:
-                    self.btn_microfono.config(state='normal', bg=DARK_ACCENT, fg=TEXT_COLOR)
+                    raise RuntimeError(f'Error de transcripción: {e}')
+
+                self.entry_msg.delete(0, tk.END)
+                if texto:
+                    self.entry_msg.insert(0, texto)
+                else:
+                    self.entry_msg.insert(0, '')
+
+            except sr.WaitTimeoutError:
+                self.entry_msg.delete(0, tk.END)
+                self._set_status('No se detectó voz. Intentá de nuevo.', timeout=4000)
+            except Exception as err:
+                self.entry_msg.delete(0, tk.END)
+                messagebox.showerror('Dictado de voz', str(err))
+            finally:
+                try:
+                    self.btn_microfono.config(state='normal')
+                except Exception:
+                    pass
 
         threading.Thread(target=grabar, daemon=True).start()
 
